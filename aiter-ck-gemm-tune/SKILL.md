@@ -41,20 +41,22 @@ Each variant follows the same tuning workflow pattern. The table below maps each
 
 ## Log Files
 
-The skill records benchmark results to log files so Step 2 (baseline) and Step 4 (after tuning) outputs can be compared. Store logs under `$AITER_PATH/tune_logs/` using this naming convention:
+The skill records outputs from Steps 2, 3, and 4 to log files under `$AITER_PATH/tune_logs/`. Use this naming convention:
 
 ```
-$AITER_PATH/tune_logs/<variant>_baseline_<YYYYMMDD_HHMMSS>.log   # Step 2 output
-$AITER_PATH/tune_logs/<variant>_tuned_<YYYYMMDD_HHMMSS>.log      # Step 4 output
+$AITER_PATH/tune_logs/<variant>_bench_before_<YYYYMMDD_HHMMSS>.log  # Step 2: baseline benchmark
+$AITER_PATH/tune_logs/<variant>_tuning_<YYYYMMDD_HHMMSS>.log        # Step 3: tuning process
+$AITER_PATH/tune_logs/<variant>_bench_after_<YYYYMMDD_HHMMSS>.log   # Step 4: post-tune benchmark
 ```
 
 For example:
 ```
-tune_logs/a8w8_blockscale_baseline_20260321_143022.log
-tune_logs/a8w8_blockscale_tuned_20260321_160515.log
+tune_logs/a8w8_blockscale_bench_before_20260321_143022.log
+tune_logs/a8w8_blockscale_tuning_20260321_150000.log
+tune_logs/a8w8_blockscale_bench_after_20260321_160515.log
 ```
 
-Create the `tune_logs/` directory if it doesn't exist. Use `tee` to write to the log file while also showing output to the user in real time.
+Create the `tune_logs/` directory if it doesn't exist. For interactive commands (Steps 2 and 4), use `2>&1 | tee <log>` to show output in real time while logging. For long-running background jobs (Step 3), redirect output to file directly (`> <log> 2>&1`).
 
 ## Workflow
 
@@ -64,11 +66,15 @@ Follow these steps in order. At each step, communicate clearly with the user abo
 
 ### Step 0: Environment Discovery
 
-Before anything else, establish the working environment:
+Before anything else, establish the working environment. Tuning typically runs inside a **Docker container on a remote node** with AMD GPUs. Ask the user to provide access details upfront:
 
-1. **Locate aiter**: Ask the user for the aiter installation path, or try common locations (`~/projects/aiter`, `~/aiter`, etc.). Verify by checking that `csrc/` and `aiter/configs/` exist under that path.
-2. **GPU info**: Run `rocm-smi` or `rocminfo` to determine `cu_num` (number of compute units) and GPU model. This matters because tuned configs are GPU-specific.
-3. **Log location**: Ask the user where the inference logs are. These could be from sglang, vllm, or another framework. Logs could also be provided directly.
+1. **Target environment access**: Ask the user how to reach the tuning environment:
+   - **Node access**: How to SSH into the node (e.g., `ssh user@node-hostname`)
+   - **Docker container**: The container name or ID to exec into (e.g., `docker exec -it <container_name> bash`)
+   - If the user is already inside the target environment (local or already SSH'd in), that's fine too — just confirm.
+   - All subsequent commands (Steps 1–4) should be run inside this environment.
+2. **Locate aiter**: The pip package may be named `aiter` or `amd-aiter`, so use `pip list | grep -i aiter` to find the exact package name, then `pip show <package_name> | grep Location` to get its installed path. Do not guess common locations — there may be multiple aiter copies on the system, and only the one registered in pip is the active installation. Verify by checking that `csrc/` and `aiter/configs/` exist under that path.
+3. **Log location**: Ask the user where the inference logs are. These could be from sglang, vllm, or another framework. Logs could also be provided directly. Logs may be on the node, inside the container, or on the user's local machine.
 4. **Verify aiter installation**: Check if aiter is installed in dev mode. If not, warn the user that `python3 setup.py develop` from the aiter root may be needed.
 
 ---
@@ -85,29 +91,43 @@ AITER itself logs untuned shapes with this pattern:
 shape is M:<value>, N:<value>, K:<value>, not found tuned config in /tmp/aiter_configs/<variant>_tuned_gemm.csv, will use default config!
 ```
 
-Parse these lines to extract:
-- **Unique (N, K) pairs** — ignore M values, as M varies per forward pass
-- **Kernel variant** — inferred from the CSV filename in the log (e.g., `a8w8_blockscale_tuned_gemm.csv` → variant is `a8w8_blockscale`)
+Use the bundled script `scripts/parse_untuned_shapes.py` to parse the log file. It extracts unique (N, K) pairs grouped by kernel variant.
 
-Use grep/regex to find all matching lines, deduplicate by (N, K), and present the results to the user for confirmation.
+**Step 1a: Run the parser to see what's in the log:**
+```bash
+python3 <skill_path>/scripts/parse_untuned_shapes.py <log_file>
+```
+
+This prints all variants found and their unique (N, K) pairs. A log may contain multiple kernel variants (e.g., both `a8w8_blockscale` and `a8w8` shapes).
+
+**Step 1b: If multiple variants are found, ask the user which to tune.** They may want to tune one specific variant or all of them. Each variant must be tuned separately (different tune scripts, CSVs, and test files).
+
+**Step 1c: Generate the untuned CSV for the chosen variant(s):**
+```bash
+# Single variant:
+python3 <skill_path>/scripts/parse_untuned_shapes.py <log_file> --variant a8w8_blockscale --csv <output.csv> --m-sweep
+
+# All variants (separate tuning runs needed per variant):
+python3 <skill_path>/scripts/parse_untuned_shapes.py <log_file> --variant all --csv <output.csv> --m-sweep
+```
+
+Present the results to the user for confirmation before proceeding. If tuning multiple variants, repeat Steps 2–4 for each variant separately.
 
 #### Option B: Direct user input
 
 The user provides (N, K) pairs and specifies the kernel variant directly.
-
-#### Option C: Model config files
-
-Pull shapes from existing model configs in `aiter/configs/model_configs/`. The user specifies which model and variant.
 
 #### Generating M values for tuning
 
 For each unique (N, K) pair, generate tuning rows by sweeping M as powers of 2:
 
 ```
-M = 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384
+M = 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768
 ```
 
-This produces `15 × number_of_unique_NK_pairs` rows for the untuned CSV.
+This produces `16 × number_of_unique_NK_pairs` rows for the untuned CSV.
+
+**Note:** The M sweep for tuning (powers of 2) is separate from the M values used for benchmarking in Steps 2/4. Benchmarking typically uses the test script's default M list, which may include non-power-of-2 values (e.g., 96, 160, 224, etc.). This is normal — we tune with powers of 2 to cover the key points, but benchmark with a broader M range to see how the tuned kernels perform across all realistic batch sizes.
 
 #### Write the untuned CSV
 
@@ -119,7 +139,7 @@ M,N,K
 2,12288,4096
 4,12288,4096
 ...
-16384,12288,4096
+32768,12288,4096
 ```
 
 Present the full shape list to the user before writing.
@@ -130,13 +150,28 @@ Present the full shape list to the user before writing.
 
 Run the unit test for the target kernel variant with the **specific shapes from Step 1** to establish baseline performance **before** tuning. No rebuild is needed at this point.
 
-The test scripts accept shapes via CLI arguments, but the argument format differs per variant. You must pass the captured shapes using the correct format:
+#### Pre-benchmark checklist: ck_preshuffle
+
+Some test scripts have a `--ck_preshuffle` or `--preshuffle` flag (currently only `a8w8_blockscale` and `moe_2stages`). The correct setting can be inferred from the kernel variant detected in Step 1:
+
+- If the log shows `a8w8_blockscale_tuned_gemm.csv` (no "bpreshuffle" in the name) → use `--ck_preshuffle False`
+- If the log shows `a8w8_blockscale_bpreshuffle_tuned_gemm.csv` → use `--ck_preshuffle True`
+
+Mention the inferred setting in your response to the user for confirmation, but no need to ask them to specify — the log already tells you.
+
+Other variants (e.g., `a8w8`, `a4w4_blockscale`, batched variants) do not have this flag — skip this for them.
+
+#### Handling test script `choices` constraints
+
+Test scripts may have argparse `choices` restrictions on `-m` and/or `-nk` that reject values not in their hardcoded lists. Before running, read the argparse section at the bottom of the test file to check for `choices` constraints. If the shapes or M values you need are not in the `choices` list, you must modify the test script:
+- For `-m`: add missing M values (e.g., 16384, 32768) to both the `choices` and `default` lists.
+- For `-nk`: remove the `choices` parameter entirely (keep `default`) so any (N,K) pair can be passed.
 
 #### CLI argument formats by variant
 
 | Variant | Test File | Shape Args | Example |
 |---------|-----------|------------|---------|
-| `a8w8_blockscale` | `test_gemm_a8w8_blockscale.py` | `-m M1 M2 ... -nk N1,K1 N2,K2 ...` | `-m 1 2 4 8 16 32 64 128 256 512 1024 2048 4096 8192 16384 -nk 12288,4096 24576,1536` |
+| `a8w8_blockscale` | `test_gemm_a8w8_blockscale.py` | `-m M1 M2 ... -nk N1,K1 N2,K2 ...` | `-m 1 2 4 ... 32768 -nk 12288,4096 24576,1536` |
 | `a8w8` | `test_gemm_a8w8.py` | `-mnk M1,N1,K1 M2,N2,K2 ...` | `-mnk 1,12288,4096 2,12288,4096 4,12288,4096` |
 | `a4w4_blockscale` | `test_gemm_a4w4.py` | `-mnk M1,N1,K1 M2,N2,K2 ...` | `-mnk 1,12288,4096 2,12288,4096 4,12288,4096` |
 | `batched_a8w8` | `test_batched_gemm_a8w8.py` | `-s M1,N1,K1 M2,N2,K2 ...` | `-s 1,12288,4096 2,12288,4096 4,12288,4096` |
@@ -149,9 +184,10 @@ For variants that use `-mnk` or `-s` (combined M,N,K tuples), generate all combi
 cd $AITER_PATH
 mkdir -p tune_logs
 python3 op_tests/test_gemm_a8w8_blockscale.py \
-  -m 1 2 4 8 16 32 64 128 256 512 1024 2048 4096 8192 16384 \
+  -m 1 2 4 8 16 32 64 128 256 512 1024 2048 4096 8192 16384 32768 \
   -nk 12288,4096 24576,1536 \
-  2>&1 | tee tune_logs/a8w8_blockscale_baseline_$(date +%Y%m%d_%H%M%S).log
+  --ck_preshuffle False \
+  2>&1 | tee tune_logs/a8w8_blockscale_bench_before_$(date +%Y%m%d_%H%M%S).log
 ```
 
 **Example for `a8w8` with (N,K) pair (12288,4096):**
@@ -162,31 +198,55 @@ python3 op_tests/test_gemm_a8w8.py \
   -mnk 1,12288,4096 2,12288,4096 4,12288,4096 8,12288,4096 \
   16,12288,4096 32,12288,4096 64,12288,4096 128,12288,4096 \
   256,12288,4096 512,12288,4096 1024,12288,4096 2048,12288,4096 \
-  4096,12288,4096 8192,12288,4096 16384,12288,4096 \
-  2>&1 | tee tune_logs/a8w8_baseline_$(date +%Y%m%d_%H%M%S).log
+  4096,12288,4096 8192,12288,4096 16384,12288,4096 32768,12288,4096 \
+  2>&1 | tee tune_logs/a8w8_bench_before_$(date +%Y%m%d_%H%M%S).log
 ```
 
 Record the baseline log file path — you will need it in Step 4 for comparison.
 
-If the variant has no test file (e.g., `a8w8_bpreshuffle`), inform the user and ask how they'd like to benchmark. If the test script's CLI format is unfamiliar or has changed, read the argparse section at the bottom of the test file to determine the correct arguments.
+If the variant has no test file (e.g., `a8w8_bpreshuffle`), inform the user and ask how they'd like to benchmark.
 
 ---
 
 ### Step 3: Tune
 
-Run the tuning script for the target variant. The general command pattern is:
+#### Check available GPUs
+
+Before tuning, run `rocm-smi` to check how many GPUs are free. Use `--mp <num_free_gpus>` to parallelize tuning across all available GPUs — this can dramatically reduce tuning time (e.g., 8x faster with 8 GPUs vs 1).
+
+```bash
+rocm-smi --showuse | grep "GPU use"
+```
+
+#### Run the tuning script
+
+The general command pattern is:
 
 ```bash
 cd $AITER_PATH
 python3 <tune_script> -i <untuned_csv> -o <tuned_csv> [options]
 ```
 
-**Example for `a8w8_blockscale`:**
+Tuning is a long-running job (potentially hours). Run it in the background with output redirected to a log file. Use `nohup` to ensure the process survives if the SSH session disconnects:
+
+**Example for `a8w8_blockscale` with 8 free GPUs:**
 ```bash
-python3 csrc/ck_gemm_a8w8_blockscale/gemm_a8w8_blockscale_tune.py \
+cd $AITER_PATH
+mkdir -p tune_logs
+nohup python3 csrc/ck_gemm_a8w8_blockscale/gemm_a8w8_blockscale_tune.py \
   -i aiter/configs/a8w8_blockscale_untuned_gemm.csv \
   -o aiter/configs/a8w8_blockscale_tuned_gemm.csv \
-  --libtype both
+  --libtype both --mp 8 --timeout 600 \
+  > tune_logs/a8w8_blockscale_tuning_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+```
+
+After launching, verify the process is running and monitor progress:
+```bash
+# Verify tuning process started (do NOT rely on $! — it doesn't work reliably through docker exec layers)
+ps aux | grep tune.py | grep -v grep
+
+# Monitor progress by tailing the log file
+tail -f tune_logs/a8w8_blockscale_tuning_*.log
 ```
 
 #### Key flags to consider
@@ -194,68 +254,100 @@ python3 csrc/ck_gemm_a8w8_blockscale/gemm_a8w8_blockscale_tune.py \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--libtype` | — | `ck`, `cktile`, or `both` (recommend `both` for best results) |
-| `--mp N` | all GPUs | Number of parallel GPU processes |
+| `--mp N` | all GPUs | Number of parallel GPU processes — set to number of free GPUs |
 | `--batch N` | 100 | Shapes per tuning batch |
 | `--errRatio` | 0.05 | Error tolerance threshold |
 | `-k` / `--splitK` | off | Enable split-K optimization |
 | `--warmup N` | 5 | Warmup iterations before profiling |
 | `--iters N` | 101 | Profiling iterations |
-| `--timeout N` | none | Timeout in seconds per task group |
+| `--timeout N` | none | Timeout in seconds per task group (recommend `600`) |
 | `-v` | off | Verbose output |
 | `--all` | off | Retune all shapes |
 
 **Important warnings to communicate to the user:**
 - Tuning can take a very long time (potentially hours) depending on the number of shapes and options
 - Using `--libtype both` is slower but produces better results
-- `--mp` can parallelize across GPUs to speed things up
+- Use `--mp` with all available GPUs to maximize parallelism
 - `--timeout` is recommended to prevent individual shapes from hanging
+- The first run includes a JIT compilation step that can take several minutes before actual tuning begins
 
 ---
 
 ### Step 4: Rerun & Compare
 
-After tuning completes, rebuild and rerun the benchmark with the **same shapes and CLI arguments from Step 2**, but with `AITER_REBUILD=1` to pick up the newly tuned kernels:
+After tuning completes, rerun the benchmark to measure improvement. **Reuse the exact same command from Step 2** with only two changes:
+1. Prepend `AITER_REBUILD=1` to force aiter to rebuild kernels using the newly tuned CSV
+2. Change the log filename from `bench_before` to `bench_after`
 
-**Example for `a8w8_blockscale`:**
+This ensures the same shapes, M values, and flags are used for an apples-to-apples comparison. Do not re-type the command manually — copy the Step 2 command and apply the two changes above.
+
+**Example — if Step 2 command was:**
 ```bash
-cd $AITER_PATH
+python3 op_tests/test_gemm_a8w8_blockscale.py \
+  -m 1 2 4 8 16 32 64 128 256 512 1024 2048 4096 8192 16384 32768 \
+  -nk 512,4096 4096,256 8192,4096 12288,4096 17408,4096 \
+  --ck_preshuffle False \
+  2>&1 | tee tune_logs/a8w8_blockscale_bench_before_20260321_143022.log
+```
+
+**Then Step 4 command is:**
+```bash
 AITER_REBUILD=1 python3 op_tests/test_gemm_a8w8_blockscale.py \
-  -m 1 2 4 8 16 32 64 128 256 512 1024 2048 4096 8192 16384 \
-  -nk 12288,4096 24576,1536 \
-  2>&1 | tee tune_logs/a8w8_blockscale_tuned_$(date +%Y%m%d_%H%M%S).log
+  -m 1 2 4 8 16 32 64 128 256 512 1024 2048 4096 8192 16384 32768 \
+  -nk 512,4096 4096,256 8192,4096 12288,4096 17408,4096 \
+  --ck_preshuffle False \
+  2>&1 | tee tune_logs/a8w8_blockscale_bench_after_$(date +%Y%m%d_%H%M%S).log
 ```
 
-**Example for `a8w8`:**
+The `AITER_REBUILD=1` flag is essential — without it, old cached kernels will be used and you won't see improvements. The first run after tuning will take extra time for JIT rebuilding.
+
+**Compare results** using the bundled comparison script:
+
 ```bash
-cd $AITER_PATH
-AITER_REBUILD=1 python3 op_tests/test_gemm_a8w8.py \
-  -mnk 1,12288,4096 2,12288,4096 4,12288,4096 8,12288,4096 \
-  16,12288,4096 32,12288,4096 64,12288,4096 128,12288,4096 \
-  256,12288,4096 512,12288,4096 1024,12288,4096 2048,12288,4096 \
-  4096,12288,4096 8192,12288,4096 16384,12288,4096 \
-  2>&1 | tee tune_logs/a8w8_tuned_$(date +%Y%m%d_%H%M%S).log
+python3 <skill_path>/scripts/compare_results.py \
+  tune_logs/<variant>_bench_before_<timestamp>.log \
+  tune_logs/<variant>_bench_after_<timestamp>.log
 ```
 
-The `AITER_REBUILD=1` flag is essential — it forces aiter to rebuild kernels using the newly tuned CSV. Without it, old cached kernels will be used and you won't see improvements.
+The script parses both log files, matches shapes by (M, N, K), and produces:
+- A per-shape comparison table with before/after TFLOPS and speedup %
+- A summary with average/min/max speedup and improved/regressed counts
+- A per-(N, K) breakdown
 
-Use the exact same shape arguments as Step 2 so results are directly comparable. Refer to the CLI argument format table in Step 2 for the correct flags per variant.
+You can also compare a different metric with `--metric "ck us"` (latency) or `--metric "asm TFLOPS"`.
 
-**Compare results** by reading both log files (baseline from Step 2 and tuned from this step):
-- For each shape (M, N, K), show before/after TFLOPS, latency (us), and speedup %
-- Highlight shapes with significant improvement or regression
-- Present a summary table to the user
-- Tell the user where both log files are stored
+Present the comparison results to the user and tell them where both log files are stored.
 
-Example comparison format:
+---
+
+### Step 5: Generate Report
+
+After completing the comparison, generate a tuning report and save it to `$AITER_PATH/tune_logs/<variant>_report_<YYYYMMDD_HHMMSS>.md`. The report should contain:
+
+1. **Environment summary**: GPU model, aiter version, aiter path
+2. **Shapes tuned**: the (N, K) pairs and kernel variant
+3. **Tuning configuration**: flags used (`--libtype`, `--mp`, `--timeout`, etc.)
+4. **Full comparison table**: the complete output from `compare_results.py` — include every shape, not a summary. This is the primary content of the report.
+5. **Summary statistics**: average/min/max speedup, improved/regressed counts, per-(N,K) breakdown grouped by M category:
+   - **Small M (1-63)**: decode-like workloads
+   - **Medium M (64-512)**: mixed workloads
+   - **Large M (>512)**: prefill-like workloads
+6. **Log file locations**: paths to all log files (bench_before, tuning, bench_after)
+
+Generate the report by running the comparison script and capturing its output:
+
+```bash
+python3 <skill_path>/scripts/compare_results.py \
+  tune_logs/<variant>_bench_before_<timestamp>.log \
+  tune_logs/<variant>_bench_after_<timestamp>.log \
+  > /tmp/compare_output.txt
 ```
-Baseline log: tune_logs/a8w8_blockscale_baseline_20260321_143022.log
-Tuned log:    tune_logs/a8w8_blockscale_tuned_20260321_160515.log
 
-| M     | N     | K    | Before (TFLOPS) | After (TFLOPS) | Speedup |
-|-------|-------|------|-----------------|----------------|---------|
-| 128   | 12288 | 4096 | 85.2            | 125.4          | +47.2%  |
-| 256   | 12288 | 4096 | 92.1            | 130.8          | +42.0%  |
-```
+Then assemble the full report as a markdown file. Save the report in two locations:
+1. **Remote**: `$AITER_PATH/tune_logs/<variant>_report_<YYYYMMDD_HHMMSS>.md` (inside the tuning environment, alongside the log files)
+2. **Local**: a copy in the user's current working directory or a location they specify
+
+Present the report to the user and tell them where both copies are saved.
 
 ---
 
