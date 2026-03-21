@@ -2,7 +2,7 @@
 name: aiter-ck-gemm-tune
 description: >
   Tune AITER's CK GEMM kernels for better performance with specific model shapes.
-  Use this skill whenever the user wants to tune, benchmark, or optimize CK GEMM kernels
+  Use this skill whenever the user wants to tune or optimize CK GEMM kernels
   in the AITER project. This includes tasks like: parsing inference logs for untuned GEMM shapes,
   running baseline benchmarks, tuning kernels for new shapes, comparing before/after performance,
   or any workflow involving aiter's ck_gemm tuning pipeline. Trigger this skill when the user
