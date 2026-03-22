@@ -21,6 +21,7 @@
 #   PORT        - server port (default: 30000)
 #   MTP         - enable MTP: 0|1 (default: 0)
 #   LOAD_DUMMY  - use dummy weights for fast startup: 0|1 (default: 1)
+#   DISABLE_RADIX_CACHE - disable radix cache: 0|1 (default: 1)
 #   DRY_RUN     - print command without running: 0|1 (default: 0)
 #   EXTRA_ARGS  - additional sglang flags
 #
@@ -34,6 +35,7 @@ PORT="${PORT:-30000}"
 LOG_DIR="${LOG_DIR:-.}"
 MTP="${MTP:-0}"
 LOAD_DUMMY="${LOAD_DUMMY:-1}"
+DISABLE_RADIX_CACHE="${DISABLE_RADIX_CACHE:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
@@ -75,8 +77,8 @@ CMD="$CMD --model-path $MODEL_PATH"
 CMD="$CMD --tp-size $WORLD_SIZE"
 CMD="$CMD --port $PORT"
 CMD="$CMD --trust-remote-code"
-CMD="$CMD --disable-radix-cache"
 
+[[ "$DISABLE_RADIX_CACHE" == "1" ]] && CMD="$CMD --disable-radix-cache"
 [[ "$LOAD_DUMMY" == "1" ]] && CMD="$CMD --load-format dummy"
 [[ $DP_SIZE -gt 1 ]] && CMD="$CMD --dp-size $DP_SIZE --enable-dp-attention --enable-dp-lm-head"
 [[ $EP_SIZE -gt 1 ]] && CMD="$CMD --ep-size $EP_SIZE"

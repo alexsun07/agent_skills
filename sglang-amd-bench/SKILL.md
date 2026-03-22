@@ -1,7 +1,5 @@
 ---
-
-## name: sglang-amd-bench
-
+name: sglang-amd-bench
 description: >
   Benchmark sglang serving performance on AMD Instinct GPUs (MI355X, MI300X, MI308X) with
   various parallel configurations (TP, DP, EP). Use this skill whenever the user wants to
@@ -12,6 +10,7 @@ description: >
   config comparison (TP vs DP vs EP), or wants to find the best sglang configuration for a
   specific model on AMD hardware. This skill covers mix mode (non-disaggregated) serving only.
   For PD-disaggregation benchmarking, a separate skill is needed.
+---
 
 # SGLang AMD Benchmark
 
@@ -33,10 +32,6 @@ Every benchmark collects these metrics per (ISL, OSL, Concurrency) combination:
 
 
 Per-GPU throughput is the most important efficiency metric — it shows how well each GPU is utilized. Two configs might have similar total throughput, but the one using fewer GPUs has better per-GPU throughput and is more cost-efficient.
-
-## MTP (Multi-Token Prediction)
-
-Some models support MTP, which can improve decode throughput. Known MTP-capable families: **DeepSeek-R1/V3**, **Qwen3**. If the user's model supports MTP, ask early in the workflow whether to run without MTP (baseline), with MTP (`--enable-mtp`), or both to compare. MTP uses extra GPU memory — may need to reduce `--mem-fraction-static`. See `references/server_config.md` for details.
 
 ## Common Workspace Layout
 
@@ -174,7 +169,9 @@ If the model is MTP-capable (DeepSeek-R1/V3, Qwen3), ask:
 - If running: **"What's the server URL?"** (e.g., `http://127.0.0.1:8000`)
 - If launching: confirm the port, `--mem-fraction-static`, any extra sglang flags the user wants
 
-Also ask: **"Any additional sglang launch flags you want to use?"** (e.g., `--quantization fp8`, `--chunked-prefill-size`, `--disable-radix-cache`, `--schedule-policy`, etc.)
+Also ask: **"Any additional sglang launch flags you want to use?"** (e.g., `--quantization fp8`, `--chunked-prefill-size`, `--schedule-policy`, etc.)
+
+Note: `--disable-radix-cache` is enabled by default in `serve.sh` for benchmarking. User can opt out with `DISABLE_RADIX_CACHE=0`.
 
 #### 1c. Parallel configurations
 
@@ -293,7 +290,7 @@ If the user already has a running server, skip the launch and use their URL.
 **3b. Wait for server ready**
 
 ```bash
-timeout 600 bash -c 'until curl -s http://localhost:30000/health > /dev/null 2>&1; do sleep 5; done'
+timeout 600 bash -c 'until curl -s http://localhost:${PORT:-30000}/health > /dev/null 2>&1; do sleep 5; done'
 ```
 
 **3c. Run benchmark**
@@ -329,39 +326,18 @@ sleep 5
 
 Repeat 3a–3d for each parallel config.
 
-### Step 4: Report Generation
+### Step 4: Report & Optimization Suggestions
 
-After all configs are benchmarked, generate the report from the benchmark logs:
+After all configs are benchmarked, read the benchmark logs from each config directory, parse the metrics (TTFT, TPOT, throughput, etc.), and write a Markdown report directly to `$BENCH_DIR/benchmark_report.md`.
 
-```bash
-python3 generate_report.py \
-  --bench-dir $BENCH_DIR \
-  --model "<MODEL_NAME>" \
-  --num-gpus <NUM_GPUS> \
-  --gpu-model "<GPU_MODEL>" \
-  --output $BENCH_DIR/benchmark_report.md
-```
-
-The report includes:
+The report should include:
 
 - Configuration summary (model, GPUs, mode, MTP status)
-- Per-config results tables with all metrics
+- Per-config results tables with all metrics + per-GPU throughput
 - Cross-config comparison highlighting the best performer for each metric
-- Per-GPU throughput efficiency analysis
-- Optimization suggestions
+- Optimization suggestions based on the patterns below
 
-Present the report to the user. Walk them through the key findings:
-
-- Which config gave best throughput?
-- Which config gave best latency (TTFT/TPOT)?
-- Where did per-GPU efficiency peak?
-- Any unexpected results or bottlenecks?
-
-### Step 5: Optimization Suggestions
-
-Based on the benchmark data, provide config-focused optimization suggestions. The skill does NOT implement these — it only identifies opportunities.
-
-**Look for these patterns in the results:**
+**Patterns to look for:**
 - **Concurrency saturation** — throughput plateaus while latency degrades. Report the "knee" point.
 - **Prefill vs decode bottleneck** — high TTFT = prefill-bound, high TPOT = decode-bound.
 - **Per-GPU efficiency** — if per-GPU throughput drops at higher TP, communication overhead is the cost.
@@ -374,6 +350,8 @@ Based on the benchmark data, provide config-focused optimization suggestions. Th
 - Quantization, radix cache, schedule policy tuning
 - AITER CK GEMM kernel tuning (`aiter-ck-gemm-tune` skill) for kernel-level optimization
 - PD-disaggregation evaluation as a separate follow-up for production
+
+Present the report to the user and walk them through the key findings.
 
 ## File Organization
 
@@ -399,7 +377,7 @@ Each config gets its own directory. `serve.sh` writes `server_<LABEL>.log`, `ben
 - This skill covers **mix mode only** (no PD-disaggregation). Prefill and decode run on the same GPUs.
 - Always set `export SGLANG_USE_AITER=1` on AMD GPUs to enable AITER optimized kernels.
 - `--random-range-ratio 1.0` ensures exact ISL/OSL lengths (no variation) for reproducible benchmarks.
-- Use `num_prompts = concurrency * 3` (minimum 10) for stable measurements.
+- `bench.sh` uses `num_prompts = concurrency * 2` — this is handled by the script automatically.
 - Between configs, fully kill the sglang server and wait for GPU memory to be freed before relaunching.
 - If a benchmark run fails or hangs, check GPU memory usage with `rocm-smi` and server health with the `/health` endpoint.
 
