@@ -1,6 +1,5 @@
 ---
-
-## name: sglang-amd-bench
+name: sglang-amd-bench
 description: >
   Benchmark sglang serving performance on AMD Instinct GPUs (MI355X, MI300X, MI308X) with
   various parallel configurations (TP, DP, EP). Use this skill whenever the user wants to
@@ -11,6 +10,7 @@ description: >
   config comparison (TP vs DP vs EP), or wants to find the best sglang configuration for a
   specific model on AMD hardware. This skill covers mix mode (non-disaggregated) serving only.
   For PD-disaggregation benchmarking, a separate skill is needed.
+---
 
 # SGLang AMD Benchmark
 
@@ -105,6 +105,8 @@ Once connected, probe automatically (no need to ask — just run and report back
 - Run `pip show sgl-kernel 2>/dev/null && python3 -c "import sglang; print('sglang version:', sglang.__version__)"` → report sglang version
 - Run `pip list | grep -i aiter` → report AITER status
 - Check common paths: `/sgl-workspace/sglang`, `/sgl-workspace/aiter`, `/sgl-workspace/mori`
+
+**If any probe reveals a broken package or missing dependency, report it to the user and stop.** Do NOT attempt to fix installs, rebuild packages, or debug environment issues yourself — that's the user's responsibility. Just report what's broken and wait for guidance.
 
 #### 0e. Locate model weights
 
@@ -254,7 +256,6 @@ For each parallel config, **actually run `scripts/serve.sh` with `DRY_RUN=1`** o
 For a small number of configs (2-3), present all dry-run outputs at once. For many configs, present them one by one. Get confirmation before proceeding to execution.
 
 ```bash
-export SGLANG_USE_AITER=1
 BENCH_DIR=/sgl-workspace/<model_short>_$(date +%Y%m%d)
 
 # Config 1 — dry run
@@ -266,7 +267,7 @@ MODEL_PATH=<MODEL_PATH> CONFIG=TP8 MTP=0 \
 LOG_DIR=$BENCH_DIR/TP8_mtp0 DRY_RUN=1 bash serve.sh
 ```
 
-Show the dry-run outputs and ask: **"Do these configs look right?"**
+Show the **full dry-run output** (including the complete formatted sglang launch command with all flags) to the user and ask: **"Do these configs look right?"**
 
 If the user wants changes, adjust and re-run the dry run. Once confirmed, proceed to Step 3.
 
@@ -274,7 +275,23 @@ If the user wants changes, adjust and re-run the dry run. Once confirmed, procee
 
 Only proceed here after the user has confirmed ALL configs in Step 2.
 
-For each parallel config:
+**Always use `serve.sh` and `bench.sh` to launch the server and run benchmarks.** Do NOT construct sglang commands manually — the scripts handle critical flags (`--enable-dp-attention`, `--enable-dp-lm-head`, `SGLANG_USE_AITER`, `PYTHONPATH`, etc.) that are easy to miss.
+
+#### 3-0. Deploy benchmark scripts to the remote node
+
+The `scripts/serve.sh` and `scripts/bench.sh` files are in the skill directory on the local machine. They need to be on the remote GPU node to run. Copy them to `/sgl-workspace/` inside the Docker container:
+
+```bash
+# From local machine: copy scripts to the remote node, then into the container
+scp scripts/serve.sh scripts/bench.sh <SSH_HOST>:/tmp/
+ssh <SSH_HOST> "docker cp /tmp/serve.sh <CONTAINER>:/sgl-workspace/ && docker cp /tmp/bench.sh <CONTAINER>:/sgl-workspace/"
+```
+
+Alternatively, if you're already inside the container, write the script content directly using `cat > /sgl-workspace/serve.sh << 'SCRIPT' ... SCRIPT`.
+
+**Important:** Avoid running scripts through nested `ssh → docker exec → bash -c` with inline heredocs — the quoting becomes unmanageable. Always copy scripts to the remote first, then run them simply with `bash serve.sh`.
+
+#### For each parallel config:
 
 **3a. Launch sglang server**
 
@@ -288,9 +305,24 @@ If the user already has a running server, skip the launch and use their URL.
 
 **3b. Wait for server ready**
 
+On AMD GPUs, AITER may JIT-compile CK kernels on first launch — this can take several minutes. Don't kill the process.
+
+**Check the server log** rather than just polling the health endpoint. Watch for:
+- **Success**: `"The server is fired up and ready to roll!"` in the log → server is ready
+- **Errors**: any traceback or crash in the log → report to user immediately, don't keep waiting
+
 ```bash
-timeout 600 bash -c 'until curl -s http://localhost:${PORT:-30000}/health > /dev/null 2>&1; do sleep 5; done'
+# Tail the server log and wait for the ready message (or an error)
+timeout 900 bash -c '
+  tail -f $BENCH_DIR/<CONFIG>_mtp<0|1>/server_*.log 2>/dev/null | while read line; do
+    echo "$line"
+    echo "$line" | grep -q "The server is fired up and ready to roll" && exit 0
+    echo "$line" | grep -qi "error\|traceback\|exception" && exit 1
+  done
+'
 ```
+
+This catches errors early instead of waiting the full timeout on a crashed server.
 
 **3c. Run benchmark**
 
@@ -376,9 +408,12 @@ Each config gets its own directory. `serve.sh` writes `server_<LABEL>.log`, `ben
 ## Important Notes
 
 - This skill covers **mix mode only** (no PD-disaggregation). Prefill and decode run on the same GPUs.
-- Always set `export SGLANG_USE_AITER=1` on AMD GPUs to enable AITER optimized kernels.
+- `serve.sh` sets `SGLANG_USE_AITER=1` automatically. `bench.sh` sets `PYTHONPATH` for sglang's benchmark module automatically. No need to set these manually.
+- **Use dummy weights by default** (`LOAD_DUMMY=1`). Dummy weights are sufficient for benchmarking throughput, latency, and parallel config comparison — real weights produce the same performance characteristics. Only use `LOAD_DUMMY=0` if the user explicitly asks for real weights. Real weights take much longer to load (10+ minutes for large models) and are rarely needed for config benchmarking.
+- **AITER JIT compilation**: After first server launch on AMD GPUs, AITER may JIT-compile CK kernels for several minutes (you may see "waiting for baton release" or similar messages). This is normal — do NOT kill the process. Wait for the health endpoint to report ready.
 - `--random-range-ratio 1.0` ensures exact ISL/OSL lengths (no variation) for reproducible benchmarks.
 - `bench.sh` uses `num_prompts = concurrency * 2` — this is handled by the script automatically.
 - Between configs, fully kill the sglang server and wait for GPU memory to be freed before relaunching.
 - If a benchmark run fails or hangs, check GPU memory usage with `rocm-smi` and server health with the `/health` endpoint.
+- **Don't fix broken environments yourself.** If you discover broken packages, missing libraries, or install issues during probing, report to the user and wait. Don't attempt to reinstall, rebuild, or debug — that wastes time and can make things worse.
 

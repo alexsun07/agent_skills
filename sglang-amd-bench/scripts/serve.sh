@@ -28,6 +28,8 @@
 
 set -eu
 
+export SGLANG_USE_AITER=1
+
 : "${MODEL_PATH:?Error: MODEL_PATH must be set}"
 : "${CONFIG:?Error: CONFIG must be set (e.g. TP8, DP8EP8, DP8EP8_A2A)}"
 

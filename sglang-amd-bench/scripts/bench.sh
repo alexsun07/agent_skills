@@ -11,6 +11,8 @@
 
 set -euo pipefail
 
+export PYTHONPATH=/sgl-workspace/sglang/python:${PYTHONPATH:-}
+
 : "${MODEL_PATH:?Error: MODEL_PATH must be set}"
 : "${LOG_DIR:?Error: LOG_DIR must be set}"
 
