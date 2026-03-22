@@ -279,12 +279,12 @@ Only proceed here after the user has confirmed ALL configs in Step 2.
 
 #### 3-0. Deploy benchmark scripts to the remote node
 
-The `scripts/serve.sh` and `scripts/bench.sh` files are in the skill directory on the local machine. They need to be on the remote GPU node to run. Copy them to `/sgl-workspace/` inside the Docker container:
+The `scripts/serve.sh`, `scripts/bench.sh`, and `scripts/stop.sh` files are in the skill directory on the local machine. They need to be on the remote GPU node to run. Copy them to `/sgl-workspace/` inside the Docker container:
 
 ```bash
 # From local machine: copy scripts to the remote node, then into the container
-scp scripts/serve.sh scripts/bench.sh <SSH_HOST>:/tmp/
-ssh <SSH_HOST> "docker cp /tmp/serve.sh <CONTAINER>:/sgl-workspace/ && docker cp /tmp/bench.sh <CONTAINER>:/sgl-workspace/"
+scp scripts/serve.sh scripts/bench.sh scripts/stop.sh <SSH_HOST>:/tmp/
+ssh <SSH_HOST> "docker cp /tmp/serve.sh <CONTAINER>:/sgl-workspace/ && docker cp /tmp/bench.sh <CONTAINER>:/sgl-workspace/ && docker cp /tmp/stop.sh <CONTAINER>:/sgl-workspace/"
 ```
 
 Alternatively, if you're already inside the container, write the script content directly using `cat > /sgl-workspace/serve.sh << 'SCRIPT' ... SCRIPT`.
@@ -295,10 +295,12 @@ Alternatively, if you're already inside the container, write the script content 
 
 **3a. Launch sglang server**
 
+Launch in background so you can proceed to benchmarking:
+
 ```bash
 MODEL_PATH=<MODEL_PATH> CONFIG=<CONFIG> MTP=<0|1> \
 LOG_DIR=$BENCH_DIR/<CONFIG>_mtp<0|1> \
-bash serve.sh
+BACKGROUND=1 bash serve.sh
 ```
 
 If the user already has a running server, skip the launch and use their URL.
@@ -307,22 +309,21 @@ If the user already has a running server, skip the launch and use their URL.
 
 On AMD GPUs, AITER may JIT-compile CK kernels on first launch — this can take several minutes. Don't kill the process.
 
-**Check the server log** rather than just polling the health endpoint. Watch for:
+**Check the server log** rather than polling the health endpoint. Watch for:
 - **Success**: `"The server is fired up and ready to roll!"` in the log → server is ready
-- **Errors**: any traceback or crash in the log → report to user immediately, don't keep waiting
+- **Fatal error**: `"Traceback (most recent call last)"` in the log → server crashed, report to user
 
 ```bash
-# Tail the server log and wait for the ready message (or an error)
 timeout 900 bash -c '
   tail -f $BENCH_DIR/<CONFIG>_mtp<0|1>/server_*.log 2>/dev/null | while read line; do
     echo "$line"
     echo "$line" | grep -q "The server is fired up and ready to roll" && exit 0
-    echo "$line" | grep -qi "error\|traceback\|exception" && exit 1
+    echo "$line" | grep -q "Traceback (most recent call last)" && exit 1
   done
 '
 ```
 
-This catches errors early instead of waiting the full timeout on a crashed server.
+Do NOT match generic words like "error" or "exception" — sglang logs many benign messages containing these (e.g., "Ignore import error", "UserWarning").
 
 **3c. Run benchmark**
 
@@ -350,10 +351,13 @@ done
 
 **3d. Stop server and repeat**
 
+Use `scripts/stop.sh` to cleanly shut down the server and verify GPU memory is freed:
+
 ```bash
-pkill -f "sglang.launch_server" || true
-sleep 5
+bash stop.sh
 ```
+
+**If a config crashes:** Report the error to the user, stop the server with `stop.sh`, and move on to the next config. Do NOT attempt to debug kernel issues, fix the crash, or retry. Document the crash and error message in the final report.
 
 Repeat 3a–3d for each parallel config.
 

@@ -22,6 +22,7 @@
 #   MTP         - enable MTP: 0|1 (default: 0)
 #   LOAD_DUMMY  - use dummy weights for fast startup: 0|1 (default: 1)
 #   DISABLE_RADIX_CACHE - disable radix cache: 0|1 (default: 1)
+#   BACKGROUND  - run server in background: 0|1 (default: 0)
 #   DRY_RUN     - print command without running: 0|1 (default: 0)
 #   EXTRA_ARGS  - additional sglang flags
 #
@@ -127,7 +128,13 @@ echo ""
 if [[ "$DRY_RUN" == "1" ]]; then
   echo "[DRY RUN] Remove DRY_RUN=1 to execute."
   exit 0
+fi
+
+mkdir -p "$LOG_DIR"
+
+if [[ "${BACKGROUND:-0}" == "1" ]]; then
+  nohup $CMD > "$LOG_FILE" 2>&1 &
+  echo "Server launched in background (PID: $!). Log: ${LOG_FILE}"
 else
-  mkdir -p "$LOG_DIR"
   exec $CMD 2>&1 | tee "$LOG_FILE"
 fi

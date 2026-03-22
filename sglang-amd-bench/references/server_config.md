@@ -89,6 +89,7 @@ The `scripts/serve.sh` script handles server launch. Always use it (with `DRY_RU
 | `MTP`                 | No       | `0`     | Enable MTP: `1` to add `--enable-mtp`                               |
 | `LOAD_DUMMY`          | No       | `1`     | Use dummy weights: `0` for real weights                             |
 | `DISABLE_RADIX_CACHE` | No       | `1`     | Disable radix cache: `0` to keep it enabled                         |
+| `BACKGROUND`          | No       | `0`     | Run server in background: `1` for nohup, `0` for foreground tee     |
 | `DRY_RUN`             | No       | `0`     | Print command without executing: `1` to preview                     |
 | `EXTRA_ARGS`          | No       | —       | Additional sglang flags appended to command                         |
 
