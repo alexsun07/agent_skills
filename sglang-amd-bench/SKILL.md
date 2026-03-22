@@ -44,13 +44,13 @@ The standard development environment uses `/sgl-workspace` as the root workspace
 
 ```
 /sgl-workspace/
-├── sglang/          # sglang source (installed via pip -e, dev mode)
-├── aiter/           # AITER source (AMD AI Tensor Engine)
-├── mori/            # Mori (communication library)
-└── sglang_bench_*/  # benchmark output directories (created by this skill)
+├── sglang/                    # sglang source (installed via pip -e, dev mode)
+├── aiter/                     # AITER source (AMD AI Tensor Engine)
+├── mori/                      # Mori (communication library)
+└── <model_short>_<YYYYMMDD>/  # benchmark output directories (created by this skill)
 ```
 
-All benchmark artifacts (CSVs, reports, logs) should be saved under `/sgl-workspace/` by default. If the user specifies a different workspace, use that instead.
+All benchmark artifacts (logs, reports) are saved under `/sgl-workspace/` by default. If the user specifies a different workspace, use that instead.
 
 ## Core Principle: Ask First, Execute Later
 
@@ -220,102 +220,93 @@ If the user says "you pick" or "whatever makes sense", then suggest values and *
 > That's 5 × 4 × 5 = 100 runs per config, times 2 configs = 200 total runs.
 > Estimated ~3+ hours. Want to proceed with these, or adjust?"
 
-#### 1e. Output location
-
-**"Where should I save the benchmark results?"**
-
-Default is `/sgl-workspace/sglang_bench_<model>_<timestamp>/`. If the user is fine with the default, confirm it. If they want a custom path, use that.
-
 ### Step 2: Confirmation Gate
 
 **Do NOT start any benchmark until this step is complete.**
 
-Present a complete summary of everything that will happen. This is the last checkpoint before execution.
+#### Naming convention
+
+Use this pattern for directories:
+
+```
+BENCH_DIR=/sgl-workspace/<model_short>_<YYYYMMDD>
+```
+
+Per-config dirs: `<CONFIG>_mtp<0|1>` (e.g., `DP8EP8_mtp0`, `TP8_mtp0`)
+
+#### Present the plan summary
 
 > **Benchmark Plan Summary**
 >
+> | Item | Value |
+> |------|-------|
+> | Model | deepseek-ai/DeepSeek-R1-0528 |
+> | GPU | 8x MI355X |
+> | Mode | Mix (non-disaggregated) |
+> | Bench dir | `/sgl-workspace/DeepSeek-R1_20260322/` |
 >
-> | Item       | Value                                                    |
-> | ---------- | -------------------------------------------------------- |
-> | Model      | deepseek-ai/DeepSeek-R1-0528                             |
-> | GPU        | 8x MI355X                                                |
-> | MTP        | Disabled                                                 |
-> | Mode       | Mix (non-disaggregated)                                  |
-> | Output dir | /sgl-workspace/sglang_bench_DeepSeek-R1_20260321_143000/ |
->
->
-> **Parallel configs:**
->
-> | Config name | Attention | MoE | sglang flags |
-> |-------------|-----------|-----|--------------|
-> | DP8+EP8 | DP=8 | EP=8 (all-to-all) | `--dp 8 --ep 8` |
-> | TP8+TP8 | TP=8 | TP=8 | `--tp 8` |
->
->
-> **Sweep:**
->
-> - ISL: [128, 512, 1024, 2048, 4096]
-> - OSL: [128, 512, 1024, 2048]
-> - Concurrency: [1, 16, 64, 128, 256]
-> - Total: 100 runs per config × 2 configs = 200 runs
-> - Estimated time: ~3 hours
->
-> **Does this look right? Ready to start?**
+> **Sweep:** ISL=[128, 512, 1024, 2048], OSL=[128, 512, 1024], CON=[1, 16, 64, 128, 256]
 
-Wait for the user to say yes. If they want changes, go back and adjust.
+#### Confirm each config with dry-run
 
-### Step 3: Benchmark Execution
-
-Only proceed here after the user has confirmed the plan in Step 2.
-
-For each parallel config in the plan:
-
-#### 3a. Launch sglang server
-
-Create the benchmark output directory, save the server config as JSON, and launch. See `references/server_config.md` for the full launch template, flag reference, and multi-node setup.
+For each parallel config, run `scripts/serve.sh` in dry-run mode to show the user the exact sglang launch command. Present them **one by one** and get confirmation before moving on to the next.
 
 ```bash
 export SGLANG_USE_AITER=1
+BENCH_DIR=/sgl-workspace/<model_short>_$(date +%Y%m%d)
 
-BENCH_DIR=/sgl-workspace/sglang_bench_<MODEL>_$(date +%Y%m%d_%H%M%S)
-mkdir -p $BENCH_DIR/{results,configs,logs}
-
-# Save server config JSON for reproducibility
-# Launch server with tee to log: $BENCH_DIR/logs/server_<CONFIG>.log
+# Config 1 — dry run
+MODEL_PATH=<MODEL_PATH> CONFIG=DP8EP8_A2A MTP=0 \
+LOG_DIR=$BENCH_DIR/DP8EP8_A2A_mtp0 DRY_RUN=1 bash serve.sh
 ```
 
-Use a separate server log per config. Add flags per user's choices (EP, MTP, quantization, multi-node — see `references/server_config.md`).
+Show the output and ask: **"Config 1 (DP8EP8_A2A_mtp0) — does this look right?"**
 
-If the user already has a running sglang server, skip the launch and use their provided URL.
-
-#### 3b. Wait for server ready
+Then the next config:
 
 ```bash
-timeout 600 bash -c 'until curl -s http://localhost:8000/health > /dev/null 2>&1; do sleep 5; done'
+# Config 2 — dry run
+MODEL_PATH=<MODEL_PATH> CONFIG=TP8 MTP=0 \
+LOG_DIR=$BENCH_DIR/TP8_mtp0 DRY_RUN=1 bash serve.sh
 ```
 
-If the server doesn't come up within 10 minutes, check the server log for errors and report to the user.
+**"Config 2 (TP8_mtp0) — does this look right?"**
 
-#### 3c. Run benchmark sweep
+Continue until all configs are confirmed. If the user wants changes to any config, adjust and re-run the dry run. Once all configs are confirmed, proceed to Step 3.
 
-Copy `scripts/bench.sh` to the GPU node. The script is driven by env vars — all parameters are configurable:
+### Step 3: Benchmark Execution
+
+Only proceed here after the user has confirmed ALL configs in Step 2.
+
+For each parallel config:
+
+**3a. Launch sglang server**
+
+```bash
+MODEL_PATH=<MODEL_PATH> CONFIG=<CONFIG> MTP=<0|1> \
+LOG_DIR=$BENCH_DIR/<CONFIG>_mtp<0|1> \
+bash serve.sh
+```
+
+If the user already has a running server, skip the launch and use their URL.
+
+**3b. Wait for server ready**
+
+```bash
+timeout 600 bash -c 'until curl -s http://localhost:30000/health > /dev/null 2>&1; do sleep 5; done'
+```
+
+**3c. Run benchmark**
 
 ```bash
 MODEL_PATH=<MODEL_PATH> \
 ISL=<ISL> OSL=<OSL> \
 CONCURRENCY="<CON1> <CON2> <CON3>" \
-PORT=<PORT> \
-LOG_DIR=$BENCH_DIR/logs/bench_<CONFIG> \
+LOG_DIR=$BENCH_DIR/<CONFIG>_mtp<0|1> \
 bash bench.sh
 ```
 
-The script:
-- Prints a banner with all settings before starting
-- Prints run info (ISL, OSL, CON, PROMPTS, timestamp) before each benchmark
-- Saves a per-concurrency log to `LOG_DIR/bench_isl<X>_osl<Y>_con<Z>.log`
-- Uses `tee` so output goes to both stdout and the log file
-
-For multiple ISL/OSL combinations, run the script once per combination:
+For multiple ISL/OSL combinations, loop:
 
 ```bash
 for ISL in 128 512 1024 2048; do
@@ -323,46 +314,33 @@ for ISL in 128 512 1024 2048; do
     ISL=$ISL OSL=$OSL \
     MODEL_PATH=<MODEL_PATH> \
     CONCURRENCY="1 16 64 128 256" \
-    LOG_DIR=$BENCH_DIR/logs/bench_<CONFIG> \
+    LOG_DIR=$BENCH_DIR/<CONFIG>_mtp<0|1> \
     bash bench.sh
   done
 done
 ```
 
-#### 3d. Stop server
-
-After completing the sweep for one config, stop the server before starting the next:
+**3d. Stop server and repeat**
 
 ```bash
 pkill -f "sglang.launch_server" || true
 sleep 5
 ```
 
-Repeat Steps 3a–3d for each parallel config.
+Repeat 3a–3d for each parallel config.
 
 ### Step 4: Report Generation
 
-After all configs are benchmarked, merge CSVs and generate the report. All paths should reference `$BENCH_DIR`:
+After all configs are benchmarked, generate the report from the benchmark logs:
 
 ```bash
-# Merge all per-config CSVs into one (keep headers from first file only)
-head -1 $BENCH_DIR/results/TP8_DP1.csv > $BENCH_DIR/results/all.csv
-for f in $BENCH_DIR/results/*.csv; do
-  [ "$f" = "$BENCH_DIR/results/all.csv" ] && continue
-  tail -n +2 "$f" >> $BENCH_DIR/results/all.csv
-done
-
-# Generate the report
 python3 generate_report.py \
-  --csv $BENCH_DIR/results/all.csv \
+  --bench-dir $BENCH_DIR \
   --model "<MODEL_NAME>" \
   --num-gpus <NUM_GPUS> \
   --gpu-model "<GPU_MODEL>" \
-  --output $BENCH_DIR/benchmark_report.md \
-  2>&1 | tee $BENCH_DIR/logs/report_generation.log
+  --output $BENCH_DIR/benchmark_report.md
 ```
-
-Add `--mtp` flag if MTP was enabled.
 
 The report includes:
 
@@ -399,19 +377,22 @@ Based on the benchmark data, provide config-focused optimization suggestions. Th
 
 ## File Organization
 
-Save all artifacts under `/sgl-workspace/sglang_bench_<MODEL>_<YYYYMMDD_HHMMSS>/` (or user-specified path). Keep the top level clean:
-
 ```
-<BENCH_DIR>/
-├── benchmark_report.md        # final report (main deliverable)
-├── results/                   # CSV data per config + merged all.csv
-├── configs/                   # server launch param JSONs
-└── logs/                      # server logs, per-run raw output, session logs
-    ├── server_<CONFIG>.log
-    └── bench_<CONFIG>/        # one log per (ISL, OSL, CON) combo
+/sgl-workspace/<model_short>_<YYYYMMDD>/
+├── benchmark_report.md                          # final report
+├── DP4EP4_mtp0/                                 # per-config directory
+│   ├── server_DP4EP4_mtp0.log                   # sglang server log (from serve.sh)
+│   ├── bench_ISL4096_OSL1024_CON64.log          # per-run benchmark log (from bench.sh)
+│   ├── bench_ISL4096_OSL1024_CON128.log
+│   └── ...
+├── TP8_mtp0/
+│   ├── server_TP8_mtp0.log
+│   └── ...
+└── DP8EP8_A2A_mtp1/
+    └── ...
 ```
 
-The `bench.sh` script handles per-concurrency logging automatically via `tee` when `LOG_DIR` is set.
+Each config gets its own directory. `serve.sh` writes `server_<LABEL>.log`, `bench.sh` writes `bench_ISL<X>_OSL<Y>_CON<Z>.log` — both into the same `LOG_DIR`.
 
 ## Important Notes
 
