@@ -56,31 +56,28 @@ Only for MoE models. Distributes experts across GPUs.
 
 ## Reading Model Architecture from config.json
 
-To make informed config suggestions, read the model's `config.json` from the weights directory. Do not rely on memorized numbers — always check the actual model.
+Read the model's `config.json` from the weights directory directly. The file is usually short — read the whole thing carefully rather than relying on a script, because field names vary across model families.
 
-```bash
-cat <MODEL_WEIGHTS_PATH>/config.json | python3 -c "
-import json, sys
-c = json.load(sys.stdin)
-print('Architecture fields:')
-# Attention
-print(f'  num_attention_heads (Q heads): {c.get(\"num_attention_heads\", \"N/A\")}')
-print(f'  num_key_value_heads (KV heads): {c.get(\"num_key_value_heads\", \"N/A\")}')
-# MoE
-print(f'  num_experts: {c.get(\"num_local_experts\", c.get(\"n_routed_experts\", \"N/A (dense model)\"))}')
-print(f'  num_experts_per_tok: {c.get(\"num_experts_per_tok\", c.get(\"num_selected_experts\", \"N/A\"))}')
-# Size
-print(f'  hidden_size: {c.get(\"hidden_size\", \"N/A\")}')
-print(f'  num_hidden_layers: {c.get(\"num_hidden_layers\", \"N/A\")}')
-# Attention type hints
-if 'qk_nope_head_dim' in c or 'kv_lora_rank' in c:
-    print('  attention_type: MLA (Multi-Latent Attention)')
-elif c.get('num_key_value_heads', 0) < c.get('num_attention_heads', 0):
-    print('  attention_type: GQA (Grouped-Query Attention)')
-else:
-    print('  attention_type: MHA (Multi-Head Attention)')
-"
-```
+**Important:** Some models (especially multimodal ones) nest architecture fields under a sub-key like `text_config`. If top-level fields look sparse, check for nested config objects.
+
+**Key fields to look for** (names may vary — search for similar names):
+
+| What you need | Common field names |
+|--------------|-------------------|
+| Q head count | `num_attention_heads`, `n_head` |
+| KV head count | `num_key_value_heads`, `num_kv_heads`, `n_head_kv` |
+| Expert count | `num_experts`, `num_local_experts`, `n_routed_experts` |
+| Active experts per token | `num_experts_per_tok`, `num_selected_experts`, `top_k` |
+| Hidden size | `hidden_size`, `d_model` |
+| Number of layers | `num_hidden_layers`, `n_layer` |
+
+**Attention type detection:**
+- **MLA** (Multi-Latent Attention): look for `qk_nope_head_dim`, `kv_lora_rank`, or `q_lora_rank` — these are MLA-specific fields (used by DeepSeek-V3/R1)
+- **GQA**: KV head count < Q head count
+- **MHA**: KV head count == Q head count
+- **Hybrid attention**: some models mix attention types (e.g., linear + full attention on alternating layers) — look for fields like `linear_attention`, `attention_type` per layer, or separate head counts for different attention types
+
+**MTP detection:** look for `mtp_num_hidden_layers` or similar fields indicating multi-token prediction layers
 
 ## How to Reason About Parallel Config
 

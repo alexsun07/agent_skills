@@ -53,7 +53,7 @@ All benchmark artifacts (logs, reports) are saved under `/sgl-workspace/` by def
 
 1. **Planning phase** (Steps 0–1): Gather ALL information through conversation. Ask questions, wait for answers. Do not proceed to the next question until the current one is answered.
 2. **Confirmation gate** (Step 2): Present the complete plan as a summary. Get explicit "go ahead" from the user.
-3. **Execution phase** (Steps 3–5): Only after full confirmation, run the benchmarks.
+3. **Execution phase** (Steps 3–4): Only after full confirmation, run the benchmarks.
 
 If at any point you're unsure about a parameter, **ask**. Never fill in a value the user hasn't confirmed.
 
@@ -110,20 +110,14 @@ Once connected, probe automatically (no need to ask — just run and report back
 
 The user may or may not have specified where the model weights are stored. If they haven't provided a path, do a quick search — but don't waste time on this:
 
-```bash
-# Check HuggingFace cache env var
-echo $HUGGINGFACE_HUB_CACHE
+Quick places to check:
+- `$HUGGINGFACE_HUB_CACHE` env var
+- `~/.cache/huggingface/hub/`
+- Common mount points: `/mnt`, `/raid`, `/data`
 
-# Check common cache locations
-ls ~/.cache/huggingface/hub/ 2>/dev/null | head -20
+Note: HuggingFace cache stores models as `models--<Org>--<Name>/snapshots/<hash>/`. For example, `Qwen/Qwen3.5-397B-A17B-FP8` would be at `models--Qwen--Qwen3.5-397B-A17B-FP8/snapshots/<hash>/`. Look for this pattern.
 
-# Check common mount points for model storage
-for dir in /mnt /raid /data; do
-  find "$dir" -maxdepth 3 -type d -name "*$(echo MODEL_NAME | tr '/' '-')*" 2>/dev/null | head -5
-done
-```
-
-Replace `MODEL_NAME` with the model name (e.g., `DeepSeek-R1-0528`). If you find a match, confirm with the user:
+If you find a match, confirm with the user:
 
 > "I found what looks like the model weights at `/data/models/DeepSeek-R1-0528/`. Is this the right location?"
 
@@ -164,12 +158,17 @@ If the model is MTP-capable (DeepSeek-R1/V3, Qwen3), ask:
 
 #### 1b. Server setup
 
-**"Do you already have a sglang server running, or should I launch one for each config?"**
+Check if a sglang server is already running — don't ask the user, just probe:
 
-- If running: **"What's the server URL?"** (e.g., `http://127.0.0.1:8000`)
-- If launching: confirm the port, `--mem-fraction-static`, any extra sglang flags the user wants
+```bash
+curl -s http://localhost:30000/health && echo "Server is running" || echo "No server running"
+pgrep -fa "sglang.launch_server" || true
+```
 
-Also ask: **"Any additional sglang launch flags you want to use?"** (e.g., `--quantization fp8`, `--chunked-prefill-size`, `--schedule-policy`, etc.)
+- If a server is running: inform the user and ask whether to shut it down or use it as-is. By default, shut it down so the skill controls the server lifecycle for each config.
+- If no server is running: good — the skill will launch one for each config.
+
+Ask: **"Any additional sglang launch flags you want to use?"** (e.g., `--quantization fp8`, `--chunked-prefill-size`, `--schedule-policy`, etc.)
 
 Note: `--disable-radix-cache` is enabled by default in `serve.sh` for benchmarking. User can opt out with `DISABLE_RADIX_CACHE=0`.
 
@@ -179,7 +178,7 @@ This is the most important decision in the benchmark. Read `references/server_co
 
 **Before asking the user**, do the following:
 
-1. **Read the model's `config.json`** from the weights directory using the script in `references/server_config.md`. Extract KV heads, Q heads, expert count, and detect attention type (MLA/GQA/MHA).
+1. **Read the model's `config.json`** from the weights directory directly (it's short). Look for KV heads, Q heads, expert count, and detect attention type (MLA/GQA/MHA). See `references/server_config.md` for the key fields to look for — but note that field names vary across models, so read carefully.
 
 2. **Analyze** the 4 factors described in `references/server_config.md` → "How to Reason About Parallel Config":
    - Weight size vs GPU HBM → which TP values fit?
@@ -244,9 +243,11 @@ Per-config dirs: `<CONFIG>_mtp<0|1>` (e.g., `DP8EP8_mtp0`, `TP8_mtp0`)
 >
 > **Sweep:** ISL=[128, 512, 1024, 2048], OSL=[128, 512, 1024], CON=[1, 16, 64, 128, 256]
 
-#### Confirm each config with dry-run
+#### Confirm configs with dry-run
 
-For each parallel config, run `scripts/serve.sh` in dry-run mode to show the user the exact sglang launch command. Present them **one by one** and get confirmation before moving on to the next.
+For each parallel config, **actually run `scripts/serve.sh` with `DRY_RUN=1`** on the GPU node — do NOT construct the launch command manually. The dry-run output shows the exact command that will be executed, ensuring consistency between what the user confirms and what actually runs.
+
+For a small number of configs (2-3), present all dry-run outputs at once. For many configs, present them one by one. Get confirmation before proceeding to execution.
 
 ```bash
 export SGLANG_USE_AITER=1
@@ -255,21 +256,15 @@ BENCH_DIR=/sgl-workspace/<model_short>_$(date +%Y%m%d)
 # Config 1 — dry run
 MODEL_PATH=<MODEL_PATH> CONFIG=DP8EP8_A2A MTP=0 \
 LOG_DIR=$BENCH_DIR/DP8EP8_A2A_mtp0 DRY_RUN=1 bash serve.sh
-```
 
-Show the output and ask: **"Config 1 (DP8EP8_A2A_mtp0) — does this look right?"**
-
-Then the next config:
-
-```bash
 # Config 2 — dry run
 MODEL_PATH=<MODEL_PATH> CONFIG=TP8 MTP=0 \
 LOG_DIR=$BENCH_DIR/TP8_mtp0 DRY_RUN=1 bash serve.sh
 ```
 
-**"Config 2 (TP8_mtp0) — does this look right?"**
+Show the dry-run outputs and ask: **"Do these configs look right?"**
 
-Continue until all configs are confirmed. If the user wants changes to any config, adjust and re-run the dry run. Once all configs are confirmed, proceed to Step 3.
+If the user wants changes, adjust and re-run the dry run. Once confirmed, proceed to Step 3.
 
 ### Step 3: Benchmark Execution
 
