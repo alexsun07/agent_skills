@@ -1,5 +1,6 @@
 ---
-name: sglang-amd-bench
+
+## name: sglang-amd-bench
 description: >
   Benchmark sglang serving performance on AMD Instinct GPUs (MI355X, MI300X, MI308X) with
   various parallel configurations (TP, DP, EP). Use this skill whenever the user wants to
@@ -10,7 +11,6 @@ description: >
   config comparison (TP vs DP vs EP), or wants to find the best sglang configuration for a
   specific model on AMD hardware. This skill covers mix mode (non-disaggregated) serving only.
   For PD-disaggregation benchmarking, a separate skill is needed.
----
 
 # SGLang AMD Benchmark
 
@@ -111,6 +111,7 @@ Once connected, probe automatically (no need to ask — just run and report back
 The user may or may not have specified where the model weights are stored. If they haven't provided a path, do a quick search — but don't waste time on this:
 
 Quick places to check:
+
 - `$HUGGINGFACE_HUB_CACHE` env var
 - `~/.cache/huggingface/hub/`
 - Common mount points: `/mnt`, `/raid`, `/data`
@@ -125,7 +126,11 @@ If nothing turns up quickly, ask:
 
 > "I couldn't find the model weights on this machine. Where are they stored?"
 
-The final `--model-path` for sglang can be either a local path or a HuggingFace model ID (sglang will download if not cached).
+The `--model-path` can be either:
+- A **local path** directly to the weights (e.g., `/data/models/DeepSeek-R1/`)
+- A **HuggingFace model ID** (e.g., `Qwen/Qwen3.5-397B-A17B-FP8`) — but only if the weights already exist in `$HUGGINGFACE_HUB_CACHE`. If the weights are at `$HUGGINGFACE_HUB_CACHE/models--<Org>--<Name>`, using the HF model ID is preferred. You can also `export HUGGINGFACE_HUB_CACHE=<path>` to point to the right cache dir.
+
+Do NOT let sglang trigger a model download — the weights must already be on disk.
 
 #### 0f. Report findings and confirm
 
@@ -179,15 +184,12 @@ This is the most important decision in the benchmark. Read `references/server_co
 **Before asking the user**, do the following:
 
 1. **Read the model's `config.json`** from the weights directory directly (it's short). Look for KV heads, Q heads, expert count, and detect attention type (MLA/GQA/MHA). See `references/server_config.md` for the key fields to look for — but note that field names vary across models, so read carefully.
-
 2. **Analyze** the 4 factors described in `references/server_config.md` → "How to Reason About Parallel Config":
-   - Weight size vs GPU HBM → which TP values fit?
-   - Attention type + KV heads → TP or DP-attention?
-   - MoE vs Dense → EP applicable?
-   - EP mode → all-to-all or all-reduce?
-
+  - Weight size vs GPU HBM → which TP values fit?
+  - Attention type + KV heads → TP or DP-attention?
+  - MoE vs Dense → EP applicable?
+  - EP mode → all-to-all or all-reduce?
 3. **Present your analysis to the user** — show your reasoning (weight size calc, KV head implications, why certain configs are better). Then present a suggested config table and **ask the user to pick**.
-
 4. **If EP is involved**, ask which EP mode (all-to-all or all-reduce), or suggest benchmarking both.
 
 Wait for the user to respond. If they say "try all of them" or "you decide", confirm your suggested set before proceeding.
@@ -234,12 +236,14 @@ Per-config dirs: `<CONFIG>_mtp<0|1>` (e.g., `DP8EP8_mtp0`, `TP8_mtp0`)
 
 > **Benchmark Plan Summary**
 >
-> | Item | Value |
-> |------|-------|
-> | Model | deepseek-ai/DeepSeek-R1-0528 |
-> | GPU | 8x MI355X |
-> | Mode | Mix (non-disaggregated) |
+>
+> | Item      | Value                                  |
+> | --------- | -------------------------------------- |
+> | Model     | deepseek-ai/DeepSeek-R1-0528           |
+> | GPU       | 8x MI355X                              |
+> | Mode      | Mix (non-disaggregated)                |
 > | Bench dir | `/sgl-workspace/DeepSeek-R1_20260322/` |
+>
 >
 > **Sweep:** ISL=[128, 512, 1024, 2048], OSL=[128, 512, 1024], CON=[1, 16, 64, 128, 256]
 
@@ -333,12 +337,14 @@ The report should include:
 - Optimization suggestions based on the patterns below
 
 **Patterns to look for:**
+
 - **Concurrency saturation** — throughput plateaus while latency degrades. Report the "knee" point.
 - **Prefill vs decode bottleneck** — high TTFT = prefill-bound, high TPOT = decode-bound.
 - **Per-GPU efficiency** — if per-GPU throughput drops at higher TP, communication overhead is the cost.
 - **MTP impact** (if both runs exist) — MTP should primarily improve TPOT and output throughput.
 
 **Suggest concrete next steps** (see `references/server_config.md` for flag details):
+
 - Better TP/DP/EP ratio based on observed tradeoffs
 - `--chunked-prefill-size` if prefill-bound
 - `--mem-fraction-static` adjustment if OOM or underutilized

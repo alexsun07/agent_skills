@@ -1,20 +1,22 @@
 # SGLang Server Configuration & Parallel Strategy
 
-This is the reference for sglang server launch configuration, parallelism strategies, and how to reason about the right config for a given model and GPU setup.
+Reference for parallelism strategies, config reasoning, and how the launch scripts work.
 
 ## GPU HBM Reference
 
-| GPU | HBM per GPU | Architecture |
-|-----|-------------|-------------|
-| MI355X | 288 GB | gfx950 |
-| MI300X | 192 GB | gfx942 |
-| MI308X | 192 GB | gfx942 |
+
+| GPU    | HBM per GPU | Architecture |
+| ------ | ----------- | ------------ |
+| MI355X | 288 GB      | gfx950       |
+| MI300X | 192 GB      | gfx942       |
+| MI308X | 192 GB      | gfx942       |
+
 
 ## Parallel Config Naming Convention
 
 For **dense models**, config is simply TP/DP (e.g., `TP8`, `TP4_DP2`).
 
-For **MoE models**, the convention is `<attention_parallel>+<MoE_parallel>` because the attention layers and MoE expert layers can use different parallelism:
+For **MoE models**, the convention is `<attention_parallel>+<MoE_parallel>`:
 
 - `TP8+TP8` — TP=8 for both attention and MoE
 - `TP4+EP4` — TP=4 for attention, EP=4 for MoE experts
@@ -27,32 +29,69 @@ For **MoE models**, the convention is `<attention_parallel>+<MoE_parallel>` beca
 
 Splits each layer's weight tensors across GPUs. Every GPU participates in computing every token, then results are all-reduced.
 
-- **Effect**: Reduces per-token latency (faster single-request), but adds all-reduce communication overhead per layer.
-- **sglang flag**: `--tp <N>`
-- **Use for**: Attention layers (if KV heads >= TP), MoE layers (as alternative to EP).
+- Reduces per-token latency, but adds all-reduce communication overhead per layer.
+- Use for attention layers when KV heads >= TP. Also works for MoE layers as an alternative to EP.
 
 ### DP (Data Parallelism / DP-Attention)
 
 For **dense models**: Creates multiple independent replicas. Each replica handles different requests.
-- **sglang flag**: `--dp <N>` (creates N replicas, each with TP = total_gpus / N)
 
-For **MoE models**: DP means **dp-attention** — parallelizes the attention computation across GPUs while MoE layers use a different strategy (usually EP).
-- **sglang flag**: `--dp <N>` (dp-attention for MoE)
-- **Key rule**: DP-attention is most commonly paired with EP. Can also pair with TP for MoE. Do NOT combine TP+DP for the attention side unless user explicitly asks.
+For **MoE models**: DP means **dp-attention** — parallelizes the attention computation across GPUs while MoE layers use a different strategy (usually EP). DP-attention is most commonly paired with EP, but can also pair with TP for MoE. Do NOT combine TP+DP for the attention side unless user explicitly asks.
 
 ### EP (Expert Parallelism)
 
-Only for MoE models. Distributes experts across GPUs.
+Only for MoE models. Distributes experts across GPUs. Two modes:
 
-- **sglang flag**: `--ep <N>`
-- **Two modes** (must choose one):
 
-| EP Mode | Communication | When to use |
-|---------|--------------|-------------|
-| **All-to-All EP** | All-to-all | Each GPU holds a subset of experts. Tokens routed to the GPU owning the target expert. |
-| **All-Reduce EP** | All-reduce | Each GPU computes on a subset of experts, results combined via all-reduce. |
+| EP Mode           | Communication | Description                                                                             |
+| ----------------- | ------------- | --------------------------------------------------------------------------------------- |
+| **All-to-All EP** | All-to-all    | Each GPU holds a subset of experts. Tokens routed to the owning GPU. Uses mori backend. |
+| **All-Reduce EP** | All-reduce    | Each GPU computes on a subset of experts, results combined via all-reduce.              |
 
-**Always ask the user which EP mode they want.** The best mode depends on expert count, network topology, and batch size.
+
+Always ask the user which EP mode they want.
+
+## How serve.sh Works
+
+The `scripts/serve.sh` script handles server launch. Always use it (with `DRY_RUN=1` to preview) — don't construct commands manually. Here's what it does for each CONFIG:
+
+### CONFIG parsing and sglang flags
+
+`--tp-size` in sglang is the **world size** (total GPUs), NOT tensor parallelism degree. The script derives it from the first number in CONFIG (e.g., `DP4EP4` → `--tp-size 4`).
+
+
+| CONFIG       | sglang flags generated                                                                                 | Why                                                                          |
+| ------------ | ------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `TP8`        | `--tp-size 8`                                                                                          | Pure TP, 8 GPUs                                                              |
+| `DP4EP4`     | `--tp-size 4 --dp-size 4 --enable-dp-attention --enable-dp-lm-head --ep-size 4`                        | DP-attention requires both `--enable-dp-attention` AND `--enable-dp-lm-head` |
+| `DP8EP8_A2A` | `--tp-size 8 --dp-size 8 --enable-dp-attention --enable-dp-lm-head --ep-size 8 --moe-a2a-backend mori` | All-to-all EP uses mori backend                                              |
+| `TP4EP4`     | `--tp-size 4 --ep-size 4`                                                                              | TP for attention + EP for MoE, no DP flags                                   |
+| `DP4TP4`     | `--tp-size 4 --dp-size 4 --enable-dp-attention --enable-dp-lm-head`                                    | DP-attention + TP for MoE, no EP                                             |
+
+
+### Critical rules the script enforces
+
+- **When DP > 1**: Always adds `--enable-dp-attention` AND `--enable-dp-lm-head`. These are required — without them, DP-attention will not work correctly.
+- **When EP with all-to-all**: Adds `--moe-a2a-backend mori`. This requires the mori library to be installed.
+- `**--disable-radix-cache`**: On by default (`DISABLE_RADIX_CACHE=1`) for reproducible benchmarking. User can opt out with `DISABLE_RADIX_CACHE=0`.
+- `**--load-format dummy**`: On by default (`LOAD_DUMMY=1`) for fast startup without loading real weights. Set `LOAD_DUMMY=0` for real benchmarks with actual weights.
+- `**--trust-remote-code**`: Always added.
+
+### Env vars
+
+
+| Env var               | Required | Default | Description                                                         |
+| --------------------- | -------- | ------- | ------------------------------------------------------------------- |
+| `MODEL_PATH`          | Yes      | —       | Path to model weights or HuggingFace model ID (must exist in cache) |
+| `CONFIG`              | Yes      | —       | Parallel config string (e.g., `DP8EP8`, `TP4`, `DP4EP4_A2A`)        |
+| `LOG_DIR`             | No       | `.`     | Directory for server log                                            |
+| `PORT`                | No       | `30000` | Server port                                                         |
+| `MTP`                 | No       | `0`     | Enable MTP: `1` to add `--enable-mtp`                               |
+| `LOAD_DUMMY`          | No       | `1`     | Use dummy weights: `0` for real weights                             |
+| `DISABLE_RADIX_CACHE` | No       | `1`     | Disable radix cache: `0` to keep it enabled                         |
+| `DRY_RUN`             | No       | `0`     | Print command without executing: `1` to preview                     |
+| `EXTRA_ARGS`          | No       | —       | Additional sglang flags appended to command                         |
+
 
 ## Reading Model Architecture from config.json
 
@@ -62,22 +101,25 @@ Read the model's `config.json` from the weights directory directly. The file is 
 
 **Key fields to look for** (names may vary — search for similar names):
 
-| What you need | Common field names |
-|--------------|-------------------|
-| Q head count | `num_attention_heads`, `n_head` |
-| KV head count | `num_key_value_heads`, `num_kv_heads`, `n_head_kv` |
-| Expert count | `num_experts`, `num_local_experts`, `n_routed_experts` |
+
+| What you need            | Common field names                                     |
+| ------------------------ | ------------------------------------------------------ |
+| Q head count             | `num_attention_heads`, `n_head`                        |
+| KV head count            | `num_key_value_heads`, `num_kv_heads`, `n_head_kv`     |
+| Expert count             | `num_experts`, `num_local_experts`, `n_routed_experts` |
 | Active experts per token | `num_experts_per_tok`, `num_selected_experts`, `top_k` |
-| Hidden size | `hidden_size`, `d_model` |
-| Number of layers | `num_hidden_layers`, `n_layer` |
+| Hidden size              | `hidden_size`, `d_model`                               |
+| Number of layers         | `num_hidden_layers`, `n_layer`                         |
+
 
 **Attention type detection:**
-- **MLA** (Multi-Latent Attention): look for `qk_nope_head_dim`, `kv_lora_rank`, or `q_lora_rank` — these are MLA-specific fields (used by DeepSeek-V3/R1)
+
+- **MLA** (Multi-Latent Attention): look for `qk_nope_head_dim`, `kv_lora_rank`, or `q_lora_rank` — MLA-specific fields (DeepSeek-V3/R1)
 - **GQA**: KV head count < Q head count
 - **MHA**: KV head count == Q head count
-- **Hybrid attention**: some models mix attention types (e.g., linear + full attention on alternating layers) — look for fields like `linear_attention`, `attention_type` per layer, or separate head counts for different attention types
+- **Hybrid attention**: some models mix attention types (e.g., linear + full attention) — look for separate head counts or per-layer attention type fields
 
-**MTP detection:** look for `mtp_num_hidden_layers` or similar fields indicating multi-token prediction layers
+**MTP detection:** look for `mtp_num_hidden_layers` or similar fields
 
 ## How to Reason About Parallel Config
 
@@ -85,41 +127,40 @@ Use the config.json values and GPU specs to analyze these factors:
 
 ### 1. Weight size vs GPU memory — which TP values fit?
 
-`weight_size / TP` must be less than GPU HBM (use ~70-80% of HBM for weights, rest for KV cache + activations).
+`weight_size / world_size` must be less than GPU HBM (use ~70-80% of HBM for weights, rest for KV cache + activations).
 
-Estimate weight size: for FP8 models, roughly `total_params_in_billions * 1 GB` (1 byte per param). For BF16, `total_params * 2 GB`.
+Estimate weight size: for FP8, roughly `total_params_in_billions * 1 GB`. For BF16, `total_params * 2 GB`.
 
-Example: 400GB FP8 model on MI355X (288GB): TP=2 (200GB/GPU), TP=4 (100GB/GPU), TP=8 (50GB/GPU) — all fit.
+Example: 400GB FP8 model on MI355X (288GB): world_size=2 (200GB/GPU), 4 (100GB/GPU), 8 (50GB/GPU) — all fit.
 
 ### 2. Attention type and KV heads — TP vs DP for attention
 
-Read `num_key_value_heads` and detect attention type from config.json.
-
-- **MLA** (detected by `qk_nope_head_dim` or `kv_lora_rank` in config): Compresses KV into a latent representation (effectively 1 KV head). High TP for attention wastes KV cache — each GPU replicates the full KV cache. **DP-attention is strongly preferred for MLA models.**
-- **GQA** (`num_key_value_heads` < `num_attention_heads`): If `num_key_value_heads >= TP`, TP is efficient. If `num_key_value_heads < TP`, KV cache gets replicated wastefully on some GPUs.
-- **MHA** (`num_key_value_heads == num_attention_heads`): TP splits heads evenly. Usually fine up to TP = num_heads.
+- **MLA** (detected by `qk_nope_head_dim` or `kv_lora_rank`): Compresses KV into a latent representation (effectively 1 KV head). High TP for attention wastes KV cache. **DP-attention is strongly preferred for MLA models.**
+- **GQA**: If `num_key_value_heads >= TP`, TP is efficient. If `num_key_value_heads < TP`, KV cache gets replicated wastefully.
+- **MHA**: TP splits heads evenly. Usually fine up to TP = num_heads.
 
 ### 3. MoE vs Dense — which parallelism strategies apply?
 
-Read `num_local_experts` or `n_routed_experts` from config.json.
-
 - **Dense models** (no expert fields): Only TP/DP. Higher TP = lower latency; higher DP = more replicas = higher throughput.
-- **MoE models**: DP+EP is the most popular config. EP distributes experts. TP can also work for MoE layers but is less common. Expert count determines EP granularity (EP must evenly divide expert count).
+- **MoE models**: DP+EP is the most popular config. Expert count determines EP granularity (EP must evenly divide expert count).
 
 ### 4. Putting it together — example analyses
 
 **MLA MoE model (e.g., DeepSeek-R1) on 8x MI355X:**
+
 - MLA → DP-attention preferred (not TP for attention)
 - MoE → EP for experts
 - Suggestion: DP8+EP8, DP4+EP4, plus TP8+TP8 as baseline
 
 **GQA MoE model (e.g., Qwen3.5-397B) on 8x MI355X:**
+
 - GQA with N KV heads → check if TP <= KV heads for attention efficiency
 - MoE → DP+EP most popular
-- ~400GB FP8 → TP2/TP4/TP8 all fit
+- ~400GB FP8 → world_size 2/4/8 all fit
 - Suggestion: DP+EP configs, plus TP+EP hybrid
 
 **GQA Dense model (e.g., Llama-70B) on 8x MI355X:**
+
 - ~70GB FP8 → fits 1 GPU
 - 8 KV heads → TP up to 8 efficient
 - Suggestion: TP1_DP8, TP2_DP4, TP4_DP2, TP8
@@ -131,94 +172,15 @@ Read `num_local_experts` or `n_routed_experts` from config.json.
 - EP must evenly divide the model's expert count
 - EP is only meaningful for MoE models
 - For MoE: attention and MoE layers can use different parallelism
-- DP-attention is most commonly paired with EP, but can also pair with TP for MoE
 - Do NOT combine TP+DP for the attention side unless user explicitly asks
-- For dense models, DP creates independent replicas
-
-## Server Launch Flags Reference
-
-### Core flags
-
-| Flag | Description | Default |
-|------|------------|---------|
-| `--model-path <PATH>` | HuggingFace model ID or local path to weights | required |
-| `--tp <N>` | Tensor parallelism degree | 1 |
-| `--dp <N>` | Data parallelism / dp-attention degree | 1 |
-| `--ep <N>` | Expert parallelism degree (MoE only) | 1 |
-| `--host <ADDR>` | Listen address | `127.0.0.1` |
-| `--port <PORT>` | Listen port | `30000` |
-| `--mem-fraction-static <F>` | Fraction of GPU memory for static allocation (weights + KV cache) | `0.88` |
-| `--trust-remote-code` | Allow running model-defined code | - |
-
-### Performance flags
-
-| Flag | Description | When to use |
-|------|------------|-------------|
-| `--enable-mtp` | Enable Multi-Token Prediction | MTP-capable models (DeepSeek, Qwen3) — ask user |
-| `--quantization fp8` | Use FP8 quantization | When model is not already FP8 |
-| `--chunked-prefill-size <N>` | Max prefill tokens per chunk | When TTFT is high at high concurrency |
-| `--disable-radix-cache` | Disable radix attention cache | For benchmarking cache impact |
-| `--schedule-policy <P>` | Scheduling policy: `lpm`, `fcfs`, `random` | For comparing scheduling strategies |
-
-### Multi-node flags
-
-| Flag | Description |
-|------|------------|
-| `--dist-init-addr <IP>:<PORT>` | Head node address for distributed init |
-| `--nnodes <N>` | Total number of nodes |
-| `--node-rank <R>` | This node's rank (0 for head) |
-
-### MTP note
-
-MTP uses additional GPU memory for the extra prediction heads. When enabling MTP, consider reducing `--mem-fraction-static` (e.g., from 0.85 to 0.80) to leave room.
-
-## Server Launch Template
-
-```bash
-export SGLANG_USE_AITER=1
-
-python3 -m sglang.launch_server \
-  --model-path <MODEL_PATH> \
-  --tp <TP> \
-  --dp <DP> \
-  --ep <EP> \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --mem-fraction-static 0.85 \
-  --trust-remote-code \
-  2>&1 | tee <LOG_PATH>
-```
-
-Omit `--dp` if DP=1, `--ep` if EP=1. Add `--enable-mtp` if user opted in.
-
-### Multi-node launch
-
-```bash
-# On each node (adjust --node-rank):
-python3 -m sglang.launch_server \
-  --model-path <MODEL_PATH> \
-  --tp <TOTAL_TP_ACROSS_NODES> \
-  --dist-init-addr <HEAD_IP>:5000 \
-  --nnodes <NUM_NODES> \
-  --node-rank <RANK> \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --trust-remote-code
-```
 
 ## AMD-Specific Environment Variables
-
-Always set these when benchmarking on AMD Instinct GPUs:
 
 ```bash
 # Required: enable AITER optimized kernels
 export SGLANG_USE_AITER=1
 
 # Multi-node NCCL settings (adjust to your network)
-export GLOO_SOCKET_IFNAME=<network_interface>     # e.g., enp193s0f1np1
-export NCCL_IB_HCA=ionic_0,ionic_1,...,ionic_7     # InfiniBand HCAs
-export NCCL_IB_TC=104
-export NCCL_IB_FIFO_TC=184
-export NCCL_IB_GID_INDEX=1
-export NCCL_CROSS_NIC=0
+export GLOO_SOCKET_IFNAME=<network_interface>
 ```
+
