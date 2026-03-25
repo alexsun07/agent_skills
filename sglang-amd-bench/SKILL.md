@@ -106,6 +106,17 @@ Once connected, probe automatically (no need to ask — just run and report back
 - Run `pip list | grep -i aiter` → report AITER status
 - Check common paths: `/sgl-workspace/sglang`, `/sgl-workspace/aiter`, `/sgl-workspace/mori`
 
+**PYTHONPATH probe (important for Docker environments):** When running inside Docker containers via `docker exec -d` (non-interactive), `.bashrc` is often not sourced due to `[ -z "$PS1" ] && return` guards. This can cause `PYTHONPATH` to be missing paths for editable installs (aiter, mori, sglang), leading to import errors like `ImportError: aiter is required when SGLANG_USE_AITER is set to True`. The `serve.sh` script auto-detects and adds common workspace paths (`/sgl-workspace/aiter`, `/sgl-workspace/mori`, `/sgl-workspace/sglang/python`) to `PYTHONPATH` if they exist but are missing. However, if you encounter import errors, compare the environments:
+
+```bash
+# Non-interactive PYTHONPATH (what docker exec -d sees)
+docker exec <container> bash -c 'echo $PYTHONPATH'
+# Interactive PYTHONPATH (what the user sees)
+docker exec <container> bash -ic 'echo $PYTHONPATH' 2>/dev/null
+```
+
+If they differ, ensure the missing paths are exported before running `serve.sh`.
+
 **If any probe reveals a broken package or missing dependency, report it to the user and stop.** Do NOT attempt to fix installs, rebuild packages, or debug environment issues yourself — that's the user's responsibility. Just report what's broken and wait for guidance.
 
 #### 0e. Locate model weights

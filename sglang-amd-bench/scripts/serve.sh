@@ -31,6 +31,14 @@ set -eu
 
 export SGLANG_USE_AITER=1
 
+# ── Auto-detect PYTHONPATH for aiter/mori/sglang ──────────────────────
+# When launched via non-interactive shells (e.g. docker exec -d), .bashrc
+# may not be sourced, causing PYTHONPATH to be missing paths needed for
+# editable installs of aiter, mori, and sglang. Auto-add them if present.
+for p in /sgl-workspace/aiter /sgl-workspace/mori /sgl-workspace/sglang/python; do
+  [[ -d "$p" && ":${PYTHONPATH:-}:" != *":$p:"* ]] && export PYTHONPATH="${p}:${PYTHONPATH:-}"
+done
+
 : "${MODEL_PATH:?Error: MODEL_PATH must be set}"
 : "${CONFIG:?Error: CONFIG must be set (e.g. TP8, DP8EP8, DP8EP8_A2A)}"
 
