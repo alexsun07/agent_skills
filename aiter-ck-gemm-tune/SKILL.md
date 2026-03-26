@@ -1,18 +1,19 @@
 ---
 name: aiter-ck-gemm-tune
 description: >
-  Tune AITER's CK GEMM kernels for better performance with specific model shapes.
-  Use this skill whenever the user wants to tune or optimize CK GEMM kernels
-  in the AITER project. This includes tasks like: parsing inference logs for untuned GEMM shapes,
+  Tune AITER's CK GEMM and fused MoE kernels for better performance with specific model shapes.
+  Use this skill whenever the user wants to tune or optimize CK GEMM kernels or fused MoE kernels
+  in the AITER project. This includes tasks like: parsing inference logs for untuned GEMM/MoE shapes,
   running baseline benchmarks, tuning kernels for new shapes, comparing before/after performance,
-  or any workflow involving aiter's ck_gemm tuning pipeline. Trigger this skill when the user
-  mentions aiter gemm tuning, ck gemm performance, kernel tuning, untuned gemm shapes,
-  or wants to optimize GEMM operations for specific model configurations.
+  or any workflow involving aiter's ck_gemm or fused_moe tuning pipeline. Trigger this skill when the user
+  mentions aiter gemm tuning, ck gemm performance, fused moe tuning, moe kernel performance,
+  kernel tuning, untuned gemm/moe shapes, or wants to optimize GEMM or MoE operations for
+  specific model configurations (e.g., Qwen MoE, DeepSeek MoE).
 ---
 
-# AITER CK GEMM Tune
+# AITER CK GEMM & MoE Tune
 
-A skill for tuning AITER's Composable Kernel (CK) GEMM kernels to achieve better performance for specific model shapes. The tuning workflow is a multi-step process: discover the environment, capture shapes, run baseline benchmarks, tune kernels, and compare results.
+A skill for tuning AITER's Composable Kernel (CK) GEMM and fused MoE kernels to achieve better performance for specific model shapes. The tuning workflow is a multi-step process: discover the environment, capture shapes, run baseline benchmarks, tune kernels, and compare results. The workflow supports both regular GEMM variants (a8w8, bf16, etc.) and the `moe_2stages` variant for fused MoE kernels used in Mixture-of-Experts models.
 
 ## Background
 
@@ -81,68 +82,85 @@ Before anything else, establish the working environment. Tuning typically runs i
 
 ### Step 1: Capture Shapes & Identify Kernel Type
 
-The goal is to extract the unique (N, K) pairs that need tuning, and determine which kernel variant to tune.
+The goal is to extract the shapes that need tuning and determine which kernel variant to tune.
 
 #### Option A: Parse from aiter logs (preferred)
 
-AITER itself logs untuned shapes with this pattern:
+AITER logs untuned shapes in two different patterns depending on the kernel type. The bundled script `scripts/parse_untuned_shapes.py` auto-detects both patterns in a single pass.
 
+**Regular GEMM pattern:**
 ```
-shape is M:<value>, N:<value>, K:<value>, not found tuned config in /tmp/aiter_configs/<variant>_tuned_gemm.csv, will use default config!
+shape is M:<value>, N:<value>, K:<value> ... not found tuned config in /tmp/aiter_configs/<variant>_tuned_gemm.csv, will use default config!
 ```
 
-Use the bundled script `scripts/parse_untuned_shapes.py` to parse the log file. It extracts unique (N, K) pairs grouped by kernel variant.
+**Fused MoE pattern (the `moe_2stages` variant):**
+```
+[fused_moe] using 1stage default for (cu_num, token, model_dim, inter_dim, expert, topk, 'ActivationType.X', 'torch.dtype', 'torch.dtype', 'torch.dtype', 'QuantType.X', use_g1u1, doweight_stage1)
+```
+
+The key word in the MoE pattern is **"default"** — it means no tuned config was found and the kernel falls back to heuristics. When a tuned config IS found, the log shows kernel names instead of "default".
 
 **Step 1a: Run the parser to see what's in the log:**
 ```bash
 python3 <skill_path>/scripts/parse_untuned_shapes.py <log_file>
 ```
 
-This prints all variants found and their unique (N, K) pairs. A log may contain multiple kernel variants (e.g., both `a8w8_blockscale` and `a8w8` shapes).
+This prints all variants found. For regular GEMM, it shows unique (N, K) pairs. For `moe_2stages`, it shows unique MoE configs (model_dim, inter_dim, expert, topk, quant type, etc.) and the token counts seen in the log.
 
-**Step 1b: If multiple variants are found, ask the user which to tune.** They may want to tune one specific variant or all of them. Each variant must be tuned separately (different tune scripts, CSVs, and test files).
+**Step 1b: If multiple variants are found, ask the user which to tune.** Each variant must be tuned separately (different tune scripts, CSVs, and test files). GEMM and MoE cannot be combined in one CSV — they have entirely different formats.
 
 **Step 1c: Generate the untuned CSV for the chosen variant(s):**
 ```bash
-# Single variant:
+# Regular GEMM variant with M sweep:
 python3 <skill_path>/scripts/parse_untuned_shapes.py <log_file> --variant a8w8_blockscale --csv <output.csv> --m-sweep
 
-# All variants (separate tuning runs needed per variant):
-python3 <skill_path>/scripts/parse_untuned_shapes.py <log_file> --variant all --csv <output.csv> --m-sweep
+# Fused MoE — use actual token values from the log:
+python3 <skill_path>/scripts/parse_untuned_shapes.py <log_file> --variant moe_2stages --csv <output.csv>
+
+# Fused MoE — sweep token as powers of 2 (more thorough):
+python3 <skill_path>/scripts/parse_untuned_shapes.py <log_file> --variant moe_2stages --csv <output.csv> --token-sweep
 ```
 
 Present the results to the user for confirmation before proceeding. If tuning multiple variants, repeat Steps 2–4 for each variant separately.
 
 #### Option B: Direct user input
 
-The user provides (N, K) pairs and specifies the kernel variant directly.
+The user provides shapes and specifies the kernel variant directly.
 
-#### Generating M values for tuning
+#### Generating sweep values for tuning
 
-For each unique (N, K) pair, generate tuning rows by sweeping M as powers of 2:
-
+**Regular GEMM:** For each unique (N, K) pair, generate tuning rows by sweeping M as powers of 2:
 ```
 M = 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768
 ```
-
 This produces `16 × number_of_unique_NK_pairs` rows for the untuned CSV.
 
-**Note:** The M sweep for tuning (powers of 2) is separate from the M values used for benchmarking in Steps 2/4. Benchmarking typically uses the test script's default M list, which may include non-power-of-2 values (e.g., 96, 160, 224, etc.). This is normal — we tune with powers of 2 to cover the key points, but benchmark with a broader M range to see how the tuned kernels perform across all realistic batch sizes.
+**Fused MoE:** For each unique MoE config, either use the actual token values from the log (realistic) or sweep token as powers of 2 with `--token-sweep` (more thorough). There is no separate M dimension — the token count IS the batch dimension.
+
+**Note:** The sweep for tuning (powers of 2) is separate from the values used for benchmarking in Steps 2/4. Benchmarking typically uses the test script's default list, which may include non-power-of-2 values. This is normal — we tune with powers of 2 to cover the key points.
 
 #### Write the untuned CSV
 
-Write the generated shapes into the variant's untuned CSV file (e.g., `aiter/configs/a8w8_blockscale_untuned_gemm.csv`). The CSV format is simply:
+The CSV format depends on the variant type:
 
+**Regular GEMM (e.g., `a8w8_blockscale`):**
 ```csv
 M,N,K
 1,12288,4096
 2,12288,4096
-4,12288,4096
 ...
 32768,12288,4096
 ```
 
-Present the full shape list to the user before writing.
+**Fused MoE (`moe_2stages`):**
+```csv
+token,model_dim,inter_dim,expert,topk,act_type,dtype,q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1
+1,4096,512,512,10,ActivationType.Silu,torch.bfloat16,torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0
+4,4096,512,512,10,ActivationType.Silu,torch.bfloat16,torch.float8_e4m3fn,torch.float8_e4m3fn,QuantType.per_1x128,1,0
+...
+```
+
+Write the CSV into the variant's untuned CSV file path (see the variant table above). Present the full shape list to the user before writing.
 
 ---
 
@@ -176,8 +194,9 @@ Test scripts may have argparse `choices` restrictions on `-m` and/or `-nk` that 
 | `a4w4_blockscale` | `test_gemm_a4w4.py` | `-mnk M1,N1,K1 M2,N2,K2 ...` | `-mnk 1,12288,4096 2,12288,4096 4,12288,4096` |
 | `batched_a8w8` | `test_batched_gemm_a8w8.py` | `-s M1,N1,K1 M2,N2,K2 ...` | `-s 1,12288,4096 2,12288,4096 4,12288,4096` |
 | `batched_bf16` | `test_batched_gemm_bf16.py` | `-s M1,N1,K1 M2,N2,K2 ...` | `-s 1,12288,4096 2,12288,4096 4,12288,4096` |
+| `moe_2stages` | `test_moe_2stage.py` | `-t T1 T2 ... -dim M,I -e E -k K -q Q -a ACT -s DW -p PS` | See MoE example below |
 
-For variants that use `-mnk` or `-s` (combined M,N,K tuples), generate all combinations of the M sweep with each (N,K) pair. For `a8w8_blockscale` which takes `-m` and `-nk` separately, pass all M values once and all (N,K) pairs once — the test script handles the cross product internally.
+For regular GEMM variants that use `-mnk` or `-s` (combined M,N,K tuples), generate all combinations of the M sweep with each (N,K) pair. For `a8w8_blockscale` which takes `-m` and `-nk` separately, pass all M values once and all (N,K) pairs once — the test script handles the cross product internally.
 
 **Example for `a8w8_blockscale` with (N,K) pairs (12288,4096) and (24576,1536):**
 ```bash
@@ -201,6 +220,56 @@ python3 op_tests/test_gemm_a8w8.py \
   4096,12288,4096 8192,12288,4096 16384,12288,4096 32768,12288,4096 \
   2>&1 | tee tune_logs/a8w8_bench_before_$(date +%Y%m%d_%H%M%S).log
 ```
+
+#### MoE-specific benchmark (`moe_2stages`)
+
+The `test_moe_2stage.py` script has a completely different CLI from the regular GEMM tests. Map the MoE config fields from Step 1 to CLI args:
+
+| MoE Config Field | CLI Arg | Notes |
+|-----------------|---------|-------|
+| token | `-t T1 T2 ...` | Space-separated list of token counts |
+| model_dim, inter_dim | `-dim M,I` | Comma-separated pair |
+| expert | `-e E` | Number of experts |
+| topk | `-k K` | Top-K experts |
+| act_type | `-a silu` or `-a gelu` | Activation function |
+| q_type | `-q N` | Quant index (see mapping below) |
+| doweight_stage1 | `-s f` or `-s t` | f=False, t=True |
+| preshuffle | `-p f` or `-p t` | f=False, t=True |
+
+**Quant index (`-q`) mapping** — the `-q` value maps to `(QuantType, q_dtype_a, q_dtype_w)`:
+
+| `-q` | QuantType | q_dtype_a | q_dtype_w | Common Name |
+|------|-----------|-----------|-----------|-------------|
+| 0 | No | None | None | a16w16 (no quant) |
+| 1 | per_Tensor | fp8 | fp8 | a8w8 per-tensor |
+| 2 | per_Token | fp8 | fp8 | a8w8 per-token |
+| 3 | per_Token | fp8 | int4 | a8w4 |
+| 4 | per_1x32 | fp4x2 | fp4x2 | a4w4 |
+| 5 | per_128x128 | fp8 | fp8 | a8w8 blockscale |
+| 6 | per_1x32 | bf16 | fp4x2 | a16w4 |
+| 7 | per_1x32 | fp8 | fp4x2 | a8w4 |
+
+To determine the correct `-q` value, match the `q_type`, `q_dtype_a`, and `q_dtype_w` from the log against this table. For example, `QuantType.per_1x128` with `fp8/fp8` maps to `-q 5`.
+
+> **Note:** `QuantType.per_1x128` in the log corresponds to `-q 5` (`per_128x128` in the test). The name difference (`per_1x128` vs `per_128x128`) is a known inconsistency between the log and the test script — they refer to the same blockscale FP8 quantization.
+
+**Example for MoE with Qwen3.5 shapes (fp8 blockscale, 512 experts, topk=10):**
+```bash
+cd $AITER_PATH
+mkdir -p tune_logs
+python3 op_tests/test_moe_2stage.py \
+  -t 1 4 8 32 64 128 1024 2048 16384 \
+  -dim 4096,512 -e 512 -k 10 -q 5 -a silu -s f -p f \
+  2>&1 | tee tune_logs/moe_2stages_bench_before_$(date +%Y%m%d_%H%M%S).log
+```
+
+#### MoE bypass caveat
+
+For `moe_2stages` with blockscale FP8 (`QuantType.per_1x128`), there is a bypass in `fused_moe.py` that **skips tuned configs** when `token * topk <= 128`. This means:
+- For topk=10 (e.g., Qwen3.5): tokens 1–12 always use default heuristics regardless of tuning
+- For topk=2 (e.g., DeepSeek): tokens 1–64 always use default heuristics
+
+Tuning these small token counts still produces valid configs, but they won't be used at inference time for this specific quant type. This is by design — the assembly kernel heuristics perform well enough at very small batch sizes. Focus benchmark attention on token counts above the bypass threshold.
 
 Record the baseline log file path — you will need it in Step 4 for comparison.
 
@@ -240,6 +309,19 @@ nohup python3 csrc/ck_gemm_a8w8_blockscale/gemm_a8w8_blockscale_tune.py \
   > tune_logs/a8w8_blockscale_tuning_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 ```
 
+**Example for `moe_2stages` with 8 free GPUs:**
+```bash
+cd $AITER_PATH
+mkdir -p tune_logs
+nohup python3 csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py \
+  -i aiter/configs/untuned_fmoe.csv \
+  -o aiter/configs/tuned_fmoe.csv \
+  --mp 8 --timeout 120 \
+  > tune_logs/moe_2stages_tuning_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+```
+
+Note: the MoE tuner does not have `--libtype`. Use `--timeout 120` (shorter than GEMM since MoE shapes tune faster).
+
 After launching, verify the process is running and monitor progress:
 ```bash
 # Verify tuning process started (do NOT rely on $! — it doesn't work reliably through docker exec layers)
@@ -275,13 +357,20 @@ tail -f tune_logs/a8w8_blockscale_tuning_*.log
 
 ### Step 4: Rerun & Compare
 
-After tuning completes, rerun the benchmark to measure improvement. **Reuse the exact same command from Step 2** with only two changes:
+After tuning completes, rerun the benchmark to measure improvement. **Reuse the exact same command from Step 2** with these changes:
+
+**For regular GEMM variants:**
 1. Prepend `AITER_REBUILD=1` to force aiter to rebuild kernels using the newly tuned CSV
 2. Change the log filename from `bench_before` to `bench_after`
 
-This ensures the same shapes, M values, and flags are used for an apples-to-apples comparison. Do not re-type the command manually — copy the Step 2 command and apply the two changes above.
+**For `moe_2stages`:**
+1. Prepend `AITER_REBUILD=1` (same as GEMM)
+2. Optionally set `AITER_CONFIG_FMOE=<path_to_tuned_csv>` if the tuned CSV is in a non-default location
+3. Change the log filename from `bench_before` to `bench_after`
 
-**Example — if Step 2 command was:**
+This ensures the same shapes and flags are used for an apples-to-apples comparison. Do not re-type the command manually — copy the Step 2 command and apply the changes above.
+
+**Example — GEMM, if Step 2 command was:**
 ```bash
 python3 op_tests/test_gemm_a8w8_blockscale.py \
   -m 1 2 4 8 16 32 64 128 256 512 1024 2048 4096 8192 16384 32768 \
@@ -299,6 +388,15 @@ AITER_REBUILD=1 python3 op_tests/test_gemm_a8w8_blockscale.py \
   2>&1 | tee tune_logs/a8w8_blockscale_bench_after_$(date +%Y%m%d_%H%M%S).log
 ```
 
+**Example — MoE after-benchmark:**
+```bash
+AITER_REBUILD=1 AITER_CONFIG_FMOE=aiter/configs/tuned_fmoe.csv \
+  python3 op_tests/test_moe_2stage.py \
+  -t 1 4 8 32 64 128 1024 2048 16384 \
+  -dim 4096,512 -e 512 -k 10 -q 5 -a silu -s f -p f \
+  2>&1 | tee tune_logs/moe_2stages_bench_after_$(date +%Y%m%d_%H%M%S).log
+```
+
 The `AITER_REBUILD=1` flag is essential — without it, old cached kernels will be used and you won't see improvements. The first run after tuning will take extra time for JIT rebuilding.
 
 **Compare results** using the bundled comparison script:
@@ -309,12 +407,16 @@ python3 <skill_path>/scripts/compare_results.py \
   tune_logs/<variant>_bench_after_<timestamp>.log
 ```
 
-The script parses both log files, matches shapes by (M, N, K), and produces:
-- A per-shape comparison table with before/after TFLOPS and speedup %
-- A summary with average/min/max speedup and improved/regressed counts
-- A per-(N, K) breakdown
+The script **auto-detects** the log format (GEMM vs MoE) and selects the appropriate comparison mode:
+- **GEMM logs**: matches shapes by (M, N, K), default metric is `ck TFLOPS` (higher is better)
+- **MoE logs**: matches shapes by (token, model_dim, inter_dim, E, topk), default metric is `us` (latency in microseconds, lower is better)
 
-You can also compare a different metric with `--metric "ck us"` (latency) or `--metric "asm TFLOPS"`.
+Both modes produce:
+- A per-shape comparison table with before/after values and speedup %
+- A summary with average/min/max speedup and improved/regressed counts
+- A per-config breakdown grouped by size category (small/medium/large)
+
+You can override the metric with `--metric "ck us"` (latency) or `--metric "asm TFLOPS"`.
 
 Present the comparison results to the user and tell them where both log files are stored.
 
@@ -325,13 +427,12 @@ Present the comparison results to the user and tell them where both log files ar
 After completing the comparison, generate a tuning report and save it to `$AITER_PATH/tune_logs/<variant>_report_<YYYYMMDD_HHMMSS>.md`. The report should contain:
 
 1. **Environment summary**: GPU model, aiter version, aiter path
-2. **Shapes tuned**: the (N, K) pairs and kernel variant
+2. **Shapes tuned**: the (N, K) pairs or MoE configs, and kernel variant
 3. **Tuning configuration**: flags used (`--libtype`, `--mp`, `--timeout`, etc.)
 4. **Full comparison table**: the complete output from `compare_results.py` — include every shape, not a summary. This is the primary content of the report.
-5. **Summary statistics**: average/min/max speedup, improved/regressed counts, per-(N,K) breakdown grouped by M category:
-   - **Small M (1-63)**: decode-like workloads
-   - **Medium M (64-512)**: mixed workloads
-   - **Large M (>512)**: prefill-like workloads
+5. **Summary statistics**: average/min/max speedup, improved/regressed counts, grouped by size category:
+   - **GEMM**: per-(N,K) breakdown grouped by M category (Small M 1-63 decode, Medium M 64-512, Large M >512 prefill)
+   - **MoE**: per-config breakdown grouped by token category (Small token 1-63 decode, Medium token 64-512, Large token >512 prefill)
 6. **Log file locations**: paths to all log files (bench_before, tuning, bench_after)
 
 Generate the report by running the comparison script and capturing its output:
