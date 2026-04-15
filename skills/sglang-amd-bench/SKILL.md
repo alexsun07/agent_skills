@@ -1,15 +1,9 @@
 ---
 name: sglang-amd-bench
 description: >
-  Benchmark sglang serving performance on AMD Instinct GPUs (MI355X, MI300X, MI308X) with
-  various parallel configurations (TP, DP, EP). Use this skill whenever the user wants to
-  benchmark, profile, or measure sglang inference performance on AMD GPUs, compare different
-  parallelism strategies, sweep ISL/OSL/concurrency combinations, or establish a performance
-  baseline for LLM serving. Trigger this skill when the user mentions sglang benchmarking,
-  serving throughput testing, TTFT/TPOT measurement, AMD GPU inference performance, parallel
-  config comparison (TP vs DP vs EP), or wants to find the best sglang configuration for a
-  specific model on AMD hardware. This skill covers mix mode (non-disaggregated) serving only.
-  For PD-disaggregation benchmarking, a separate skill is needed.
+  Benchmark sglang serving performance on AMD Instinct GPUs (MI355X, MI300X, MI308X)
+  with various parallel configurations (TP, DP, EP). Covers throughput/latency sweeps
+  (ISL, OSL, concurrency), TTFT/TPOT measurement, and config comparison. Mix mode only.
 ---
 
 # SGLang AMD Benchmark
