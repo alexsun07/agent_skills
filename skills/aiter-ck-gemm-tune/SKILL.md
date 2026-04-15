@@ -1,14 +1,9 @@
 ---
 name: aiter-ck-gemm-tune
 description: >
-  Tune AITER's CK GEMM and fused MoE kernels for better performance with specific model shapes.
-  Use this skill whenever the user wants to tune or optimize CK GEMM kernels or fused MoE kernels
-  in the AITER project. This includes tasks like: parsing inference logs for untuned GEMM/MoE shapes,
-  running baseline benchmarks, tuning kernels for new shapes, comparing before/after performance,
-  or any workflow involving aiter's ck_gemm or fused_moe tuning pipeline. Trigger this skill when the user
-  mentions aiter gemm tuning, ck gemm performance, fused moe tuning, moe kernel performance,
-  kernel tuning, untuned gemm/moe shapes, or wants to optimize GEMM or MoE operations for
-  specific model configurations (e.g., Qwen MoE, DeepSeek MoE).
+  Tune AITER's CK GEMM and fused MoE kernels for specific model shapes on AMD GPUs.
+  Covers shape discovery from inference logs, baseline benchmarking, kernel tuning,
+  and before/after performance comparison.
 ---
 
 # AITER CK GEMM & MoE Tune
