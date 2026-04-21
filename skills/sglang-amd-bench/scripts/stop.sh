@@ -1,6 +1,7 @@
 #!/bin/bash
 #
-# Stop sglang server and verify GPU memory is freed
+# Stop sglang server (kill matching processes inside this container).
+# Use verify_stop.sh on the host afterwards to confirm GPUs are free.
 #
 # Usage:
 #   bash stop.sh
@@ -9,17 +10,6 @@
 set -eu
 
 echo "Stopping sglang server..."
-
-# Kill all sglang processes
-ps -ef | grep -i sglang | grep -v grep | awk '{print $2}' | xargs kill -9
-
+ps -ef | grep -i sglang | grep -v grep | awk '{print $2}' | xargs -r kill -9
 sleep 6
-
-# Verify no GPU processes and memory is freed
-echo "Checking GPU processes:"
-rocm-smi --showpids 2>/dev/null || true
-echo ""
-echo "GPU VRAM usage:"
-rocm-smi 2>/dev/null || true
-
-echo "Done."
+echo "Done. Now run verify_stop.sh on the HOST to confirm GPUs are released."

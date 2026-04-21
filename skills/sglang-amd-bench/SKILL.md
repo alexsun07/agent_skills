@@ -284,11 +284,11 @@ Only proceed here after the user has confirmed ALL configs in Step 2.
 
 #### 3-0. Deploy benchmark scripts to the remote node
 
-The `scripts/serve.sh`, `scripts/bench.sh`, and `scripts/stop.sh` files are in the skill directory on the local machine. They need to be on the remote GPU node to run. Copy them to `/sgl-workspace/` inside the Docker container:
+The `scripts/serve.sh`, `scripts/bench.sh`, `scripts/stop.sh`, and `scripts/verify_stop.sh` files live in the skill directory on the local machine. `serve.sh`/`bench.sh`/`stop.sh` run inside the container; `verify_stop.sh` MUST run on the host (so it can see PIDs from sibling containers).
 
 ```bash
-# From local machine: copy scripts to the remote node, then into the container
-scp scripts/serve.sh scripts/bench.sh scripts/stop.sh <SSH_HOST>:/tmp/
+# From local: scripts → remote node → into container (verify_stop.sh stays on the host)
+scp scripts/serve.sh scripts/bench.sh scripts/stop.sh scripts/verify_stop.sh <SSH_HOST>:/tmp/
 ssh <SSH_HOST> "docker cp /tmp/serve.sh <CONTAINER>:/sgl-workspace/ && docker cp /tmp/bench.sh <CONTAINER>:/sgl-workspace/ && docker cp /tmp/stop.sh <CONTAINER>:/sgl-workspace/"
 ```
 
@@ -332,37 +332,38 @@ Do NOT match generic words like "error" or "exception" — sglang logs many beni
 
 **3c. Run benchmark**
 
+`bench.sh` no longer writes per-run logs itself. Set `OUTPUT_DIR` (default `/sgl-workspace`); per-run JSONL is written to `${OUTPUT_DIR}/jsonl_dir/` and **you MUST capture stdout+stderr with `2>&1 | tee $OUTPUT_DIR/<name>.log`** so the human-readable log sits next to the `raw/` subdir.
+
 ```bash
-MODEL_PATH=<MODEL_PATH> \
-ISL=<ISL> OSL=<OSL> \
+OUTPUT_DIR=$BENCH_DIR/<CONFIG>_mtp<0|1> \
+MODEL_PATH=<MODEL_PATH> ISL=<ISL> OSL=<OSL> \
 CONCURRENCY="<CON1> <CON2> <CON3>" \
-LOG_DIR=$BENCH_DIR/<CONFIG>_mtp<0|1> \
-bash bench.sh
+bash bench.sh 2>&1 | tee $OUTPUT_DIR/bench_ISL<X>_OSL<Y>.log
 ```
 
-For multiple ISL/OSL combinations, loop:
+For multiple ISL/OSL combinations, loop (remember `2>&1 | tee` per invocation):
 
 ```bash
+export OUTPUT_DIR=$BENCH_DIR/<CONFIG>_mtp<0|1>
 for ISL in 128 512 1024 2048; do
   for OSL in 128 512 1024; do
-    ISL=$ISL OSL=$OSL \
-    MODEL_PATH=<MODEL_PATH> \
+    MODEL_PATH=<MODEL_PATH> ISL=$ISL OSL=$OSL \
     CONCURRENCY="1 16 64 128 256" \
-    LOG_DIR=$BENCH_DIR/<CONFIG>_mtp<0|1> \
-    bash bench.sh
+    bash bench.sh 2>&1 | tee $OUTPUT_DIR/bench_ISL${ISL}_OSL${OSL}.log
   done
 done
 ```
 
 **3d. Stop server and repeat**
 
-Use `scripts/stop.sh` to cleanly shut down the server and verify GPU memory is freed:
+Kill sglang inside the container, then verify on the host (sibling-container PIDs are invisible from within the container):
 
 ```bash
-bash stop.sh
+ssh <SSH_HOST> "docker exec <CONTAINER> bash /sgl-workspace/stop.sh"
+ssh <SSH_HOST> bash /tmp/verify_stop.sh   # exit 0 = GPUs free; non-zero prints offending PIDs
 ```
 
-**If a config crashes:** Report the error to the user, stop the server with `stop.sh`, and move on to the next config. Do NOT attempt to debug kernel issues, fix the crash, or retry. Document the crash and error message in the final report.
+**If a config crashes:** Report the error, run `stop.sh` then `verify_stop.sh`, and move on to the next config. Do NOT debug kernel issues or retry. Document the crash and error message in the final report.
 
 Repeat 3a–3d for each parallel config.
 
@@ -402,9 +403,11 @@ Present the report to the user and walk them through the key findings.
 ├── benchmark_report.md                          # final report
 ├── DP4EP4_mtp0/                                 # per-config directory
 │   ├── server_DP4EP4_mtp0.log                   # sglang server log (from serve.sh)
-│   ├── bench_ISL4096_OSL1024_CON64.log          # per-run benchmark log (from bench.sh)
-│   ├── bench_ISL4096_OSL1024_CON128.log
-│   └── ...
+│   ├── bench_ISL4096_OSL1024.log                # bench.sh stdout/stderr (you capture via `2>&1 | tee`)
+│   └── jsonl_dir/                               # raw JSONL written by bench.sh --output-file
+│       ├── bench_ISL4096_OSL1024_CON64.jsonl
+│       ├── bench_ISL4096_OSL1024_CON128.jsonl
+│       └── ...
 ├── TP8_mtp0/
 │   ├── server_TP8_mtp0.log
 │   └── ...
@@ -412,7 +415,7 @@ Present the report to the user and walk them through the key findings.
     └── ...
 ```
 
-Each config gets its own directory. `serve.sh` writes `server_<LABEL>.log`, `bench.sh` writes `bench_ISL<X>_OSL<Y>_CON<Z>.log` — both into the same `LOG_DIR`.
+Each config gets its own directory. `serve.sh` writes `server_<LABEL>.log` into `LOG_DIR`. `bench.sh` writes JSONL into `OUTPUT_DIR`; capture its stdout/stderr to the same `OUTPUT_DIR` via `2>&1 | tee $OUTPUT_DIR/<bench>.log`.
 
 ## Important Notes
 
