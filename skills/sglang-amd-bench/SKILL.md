@@ -160,13 +160,19 @@ Present everything you found to the user:
 
 #### 1a. MTP decision (if applicable)
 
-If the model is MTP-capable (DeepSeek-R1/V3, Qwen3), ask:
+If the model is MTP-capable (detected via `mtp_num_hidden_layers` in config.json, or known models like DeepSeek-R1/V3, Qwen3.5), ask:
 
 **"This model supports Multi-Token Prediction (MTP), which can improve decode throughput. By default we run without MTP for a clean baseline. What would you like to do?"**
 
 1. Run without MTP (baseline only)
 2. Run with MTP enabled
 3. Run both and compare
+
+If the user wants MTP, determine:
+- **MTP steps** (`MTP=N`): typically matches `mtp_num_hidden_layers` from config.json (e.g., 3 for Qwen3.5)
+- **MTP algorithm** (`MTP_ALGO`): model-dependent — see `references/server_config.md` for the per-model table
+
+`serve.sh` handles all speculative decoding flags (`--speculative-algorithm`, `--speculative-num-steps`, `--speculative-eagle-topk`, `--speculative-num-draft-tokens`) automatically from `MTP` and `MTP_ALGO`.
 
 #### 1b. Server setup
 
@@ -367,32 +373,56 @@ ssh <SSH_HOST> bash /tmp/verify_stop.sh   # exit 0 = GPUs free; non-zero prints 
 
 Repeat 3a–3d for each parallel config.
 
-### Step 4: Report & Optimization Suggestions
+### Step 4: Report
 
-After all configs are benchmarked, read the benchmark logs from each config directory, parse the metrics (TTFT, TPOT, throughput, etc.), and write a Markdown report directly to `$BENCH_DIR/benchmark_report.md`.
+After all configs are benchmarked, generate structured CSV data, a performance plot, and a Markdown report.
 
-The report should include:
+#### 4a. Generate CSV from JSONL
+
+For each config directory, run `jsonl_to_csv.py` to extract metrics into an InferenceX-compatible CSV:
+
+```bash
+python3 /sgl-workspace/jsonl_to_csv.py \
+  --jsonl-dir $BENCH_DIR/<CONFIG>_mtp<N>/jsonl_dir \
+  --hardware <HARDWARE> \
+  --precision <PRECISION> \
+  --model <MODEL_NAME> \
+  --date <YYYY-MM-DD> \
+  --output $BENCH_DIR/<CONFIG>_mtp<N>/<MODEL>_<HARDWARE>_<PRECISION>.csv
+```
+
+Required args:
+- `--hardware`: GPU hardware name (e.g. `mi355x`, `b200`, `b300`)
+- `--precision`: weight precision (e.g. `fp4`, `fp8`, `bf16`)
+
+Optional args:
+- `--model`: model display name (default: auto-detected from model path)
+- `--date`: benchmark date (default: today)
+- `--output`: output CSV path (default: auto-named in jsonl-dir parent)
+
+The CSV follows InferenceX format with all standard columns (throughput/GPU, TTFT, TPOT, interactivity, ITL, E2E latency, etc.). Time values are stored in **seconds** (matching InferenceX convention, despite column headers saying "ms"). Interactivity = 1000 / TPOT(ms).
+
+#### 4b. Generate performance plot
+
+Run `plot_interactivity.py` to produce a **Token Throughput per GPU vs. Interactivity** chart from one or more CSVs:
+
+```bash
+python3 /sgl-workspace/plot_interactivity.py \
+  $BENCH_DIR/<CONFIG1>/<CSV1>.csv \
+  $BENCH_DIR/<CONFIG2>/<CSV2>.csv \
+  -o $BENCH_DIR/interactivity_plot.png
+```
+
+You can also include reference CSVs (e.g. from InferenceX) alongside your benchmark CSVs to produce comparison plots. Optional args: `--title`, `--subtitle`, `--dpi` (default: 150).
+
+#### 4c. Write Markdown report
+
+Write a Markdown report to `$BENCH_DIR/benchmark_report.md` that includes:
 
 - Configuration summary (model, GPUs, mode, MTP status)
 - Per-config results tables with all metrics + per-GPU throughput
 - Cross-config comparison highlighting the best performer for each metric
-- Optimization suggestions based on the patterns below
-
-**Patterns to look for:**
-
-- **Concurrency saturation** — throughput plateaus while latency degrades. Report the "knee" point.
-- **Prefill vs decode bottleneck** — high TTFT = prefill-bound, high TPOT = decode-bound.
-- **Per-GPU efficiency** — if per-GPU throughput drops at higher TP, communication overhead is the cost.
-- **MTP impact** (if both runs exist) — MTP should primarily improve TPOT and output throughput.
-
-**Suggest concrete next steps** (see `references/server_config.md` for flag details):
-
-- Better TP/DP/EP ratio based on observed tradeoffs
-- `--chunked-prefill-size` if prefill-bound
-- `--mem-fraction-static` adjustment if OOM or underutilized
-- Quantization, radix cache, schedule policy tuning
-- AITER CK GEMM kernel tuning (`aiter-ck-gemm-tune` skill) for kernel-level optimization
-- PD-disaggregation evaluation as a separate follow-up for production
+- Reference to the generated CSV and plot files
 
 Present the report to the user and walk them through the key findings.
 

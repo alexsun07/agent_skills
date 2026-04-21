@@ -86,7 +86,8 @@ The `scripts/serve.sh` script handles server launch. Always use it (with `DRY_RU
 | `CONFIG`              | Yes      | —       | Parallel config string (e.g., `DP8EP8`, `TP4`, `DP4EP4_A2A`)        |
 | `LOG_DIR`             | No       | `.`     | Directory for server log                                            |
 | `PORT`                | No       | `30000` | Server port                                                         |
-| `MTP`                 | No       | `0`     | Enable MTP: `1` to add `--enable-mtp`                               |
+| `MTP`                 | No       | `0`     | MTP steps: `0`=off, `N`>0=enable with N speculative steps           |
+| `MTP_ALGO`            | When MTP>0 | —     | Speculative algorithm: `NEXTN` or `EAGLE` (model-dependent)         |
 | `LOAD_DUMMY`          | No       | `1`     | Use dummy weights: `0` for real weights                             |
 | `DISABLE_RADIX_CACHE` | No       | `1`     | Disable radix cache: `0` to keep it enabled                         |
 | `BACKGROUND`          | No       | `0`     | Run server in background: `1` for nohup, `0` for foreground tee     |
@@ -121,6 +122,15 @@ Read the model's `config.json` from the weights directory directly. The file is 
 - **Hybrid attention**: some models mix attention types (e.g., linear + full attention) — look for separate head counts or per-layer attention type fields
 
 **MTP detection:** look for `mtp_num_hidden_layers` or similar fields
+
+**MTP speculative algorithm by model:**
+
+| Model family       | MTP Algorithm | Notes                                    |
+| ------------------- | ------------- | ---------------------------------------- |
+| Qwen3.5 (397B MoE) | `NEXTN`       | Uses `--speculative-algorithm NEXTN`     |
+| DeepSeek-V3/R1      | `EAGLE`       | Uses `--speculative-algorithm EAGLE`     |
+
+When launching with `MTP>0`, set `MTP_ALGO` to the correct algorithm for the model.
 
 ## How to Reason About Parallel Config
 

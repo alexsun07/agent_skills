@@ -19,7 +19,8 @@
 #   CONFIG      - (required) parallel config
 #   LOG_DIR     - log directory (default: .)
 #   PORT        - server port (default: 30000)
-#   MTP         - enable MTP: 0|1 (default: 0)
+#   MTP         - MTP speculative decoding steps: 0=off, N>0=mtp with N steps (default: 0)
+#   MTP_ALGO    - speculative algorithm: NEXTN|EAGLE (required when MTP>0)
 #   LOAD_DUMMY  - use dummy weights for fast startup: 0|1 (default: 1)
 #   DISABLE_RADIX_CACHE - disable radix cache: 0|1 (default: 1)
 #   BACKGROUND  - run server in background: 0|1 (default: 0)
@@ -94,11 +95,21 @@ CMD="$CMD --trust-remote-code"
 [[ $DP_SIZE -gt 1 ]] && CMD="$CMD --dp-size $DP_SIZE --enable-dp-attention --enable-dp-lm-head"
 [[ $EP_SIZE -gt 1 ]] && CMD="$CMD --ep-size $EP_SIZE"
 [[ $A2A -eq 1 ]] && CMD="$CMD --moe-a2a-backend mori"
-[[ "$MTP" == "1" ]] && CMD="$CMD --enable-mtp"
+if [[ "$MTP" -gt 0 ]]; then
+  : "${MTP_ALGO:?Error: MTP_ALGO must be set when MTP>0 (e.g. NEXTN, EAGLE)}"
+  CMD="$CMD --speculative-algorithm $MTP_ALGO"
+  CMD="$CMD --speculative-num-steps $MTP"
+  CMD="$CMD --speculative-eagle-topk 1"
+  CMD="$CMD --speculative-num-draft-tokens $(( MTP + 1 ))"
+fi
 [[ -n "$EXTRA_ARGS" ]] && CMD="$CMD $EXTRA_ARGS"
 
 # ── Log ──────────────────────────────────────────────────────────────
-MTP_LABEL="mtp${MTP}"
+if [[ "$MTP" -gt 0 ]]; then
+  MTP_LABEL="mtp${MTP}"
+else
+  MTP_LABEL="mtp0"
+fi
 if [[ $A2A -eq 1 ]]; then
   LOG_LABEL="${CFG}_A2A_${MTP_LABEL}"
 else
