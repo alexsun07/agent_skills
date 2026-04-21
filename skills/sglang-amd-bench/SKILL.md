@@ -332,7 +332,7 @@ Do NOT match generic words like "error" or "exception" — sglang logs many beni
 
 **3c. Run benchmark**
 
-`bench.sh` no longer writes per-run logs itself. Set `OUTPUT_DIR` (default `/sgl-workspace`); per-run JSONL is written to `${OUTPUT_DIR}/jsonl_dir/` and **you MUST capture stdout+stderr with `2>&1 | tee $OUTPUT_DIR/<name>.log`** so the human-readable log sits next to the `raw/` subdir.
+`bench.sh` no longer writes per-run logs itself. Set `OUTPUT_DIR`; per-run JSONL is written to `${OUTPUT_DIR}/jsonl_dir/` and **you MUST capture stdout+stderr with `2>&1 | tee $OUTPUT_DIR/<name>.log`**.
 
 ```bash
 OUTPUT_DIR=$BENCH_DIR/<CONFIG>_mtp<0|1> \
