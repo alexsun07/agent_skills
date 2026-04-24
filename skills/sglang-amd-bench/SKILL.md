@@ -162,14 +162,14 @@ Present everything you found to the user:
 
 If the model is MTP-capable (detected via `mtp_num_hidden_layers` in config.json, or known models like DeepSeek-R1/V3, Qwen3.5), ask:
 
-**"This model supports Multi-Token Prediction (MTP), which can improve decode throughput. By default we run without MTP for a clean baseline. What would you like to do?"**
+**"This model supports Multi-Token Prediction (MTP), which can improve decode throughput. MTP is configured by a step count `N` (`MTP=0` disables it; `MTP=N` for `N>0` enables N speculative steps). By default we run with `MTP=0` for a clean baseline. What would you like to do?"**
 
-1. Run without MTP (baseline only)
-2. Run with MTP enabled
-3. Run both and compare
+1. Run with `MTP=0` only (baseline)
+2. Run with `MTP=N` for a chosen `N` (ask the user for `N`)
+3. Run both `MTP=0` and `MTP=N`, and compare
 
-If the user wants MTP, determine:
-- **MTP steps** (`MTP=N`): typically matches `mtp_num_hidden_layers` from config.json (e.g., 3 for Qwen3.5)
+If the user wants MTP enabled, determine:
+- **MTP steps** (`MTP=N`, where `N` is an integer ≥ 1, NOT a 0/1 toggle). If unsure, ask the user.
 - **MTP algorithm** (`MTP_ALGO`): model-dependent — see `references/server_config.md` for the per-model table
 
 `serve.sh` handles all speculative decoding flags (`--speculative-algorithm`, `--speculative-num-steps`, `--speculative-eagle-topk`, `--speculative-num-draft-tokens`) automatically from `MTP` and `MTP_ALGO`.
@@ -243,7 +243,7 @@ Use this pattern for directories:
 BENCH_DIR=/sgl-workspace/<model_short>_<YYYYMMDD>
 ```
 
-Per-config dirs: `<CONFIG>_mtp<0|1>` (e.g., `DP8EP8_mtp0`, `TP8_mtp0`)
+Per-config dirs: `<CONFIG>_mtp<N>` where `N` is the MTP step count (`0` = off, e.g. `DP8EP8_mtp0`, `TP8_mtp0`, `DP8EP8_mtp3`)
 
 #### Present the plan summary
 
@@ -309,8 +309,8 @@ Alternatively, if you're already inside the container, write the script content 
 Launch in background so you can proceed to benchmarking:
 
 ```bash
-MODEL_PATH=<MODEL_PATH> CONFIG=<CONFIG> MTP=<0|1> \
-LOG_DIR=$BENCH_DIR/<CONFIG>_mtp<0|1> \
+MODEL_PATH=<MODEL_PATH> CONFIG=<CONFIG> MTP=<N> \
+LOG_DIR=$BENCH_DIR/<CONFIG>_mtp<N> \
 BACKGROUND=1 bash serve.sh
 ```
 
@@ -326,7 +326,7 @@ On AMD GPUs, AITER may JIT-compile CK kernels on first launch — this can take 
 
 ```bash
 timeout 900 bash -c '
-  tail -f $BENCH_DIR/<CONFIG>_mtp<0|1>/server_*.log 2>/dev/null | while read line; do
+  tail -f $BENCH_DIR/<CONFIG>_mtp<N>/server_*.log 2>/dev/null | while read line; do
     echo "$line"
     echo "$line" | grep -q "The server is fired up and ready to roll" && exit 0
     echo "$line" | grep -q "Traceback (most recent call last)" && exit 1
@@ -341,7 +341,7 @@ Do NOT match generic words like "error" or "exception" — sglang logs many beni
 `bench.sh` no longer writes per-run logs itself. Set `OUTPUT_DIR`; per-run JSONL is written to `${OUTPUT_DIR}/jsonl_dir/` and **you MUST capture stdout+stderr with `2>&1 | tee $OUTPUT_DIR/<name>.log`**.
 
 ```bash
-OUTPUT_DIR=$BENCH_DIR/<CONFIG>_mtp<0|1> \
+OUTPUT_DIR=$BENCH_DIR/<CONFIG>_mtp<N> \
 MODEL_PATH=<MODEL_PATH> ISL=<ISL> OSL=<OSL> \
 CONCURRENCY="<CON1> <CON2> <CON3>" \
 bash bench.sh 2>&1 | tee $OUTPUT_DIR/bench_ISL<X>_OSL<Y>.log
@@ -350,7 +350,7 @@ bash bench.sh 2>&1 | tee $OUTPUT_DIR/bench_ISL<X>_OSL<Y>.log
 For multiple ISL/OSL combinations, loop (remember `2>&1 | tee` per invocation):
 
 ```bash
-export OUTPUT_DIR=$BENCH_DIR/<CONFIG>_mtp<0|1>
+export OUTPUT_DIR=$BENCH_DIR/<CONFIG>_mtp<N>
 for ISL in 128 512 1024 2048; do
   for OSL in 128 512 1024; do
     MODEL_PATH=<MODEL_PATH> ISL=$ISL OSL=$OSL \
