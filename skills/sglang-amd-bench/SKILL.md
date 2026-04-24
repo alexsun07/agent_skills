@@ -10,6 +10,66 @@ description: >
 
 Benchmark sglang LLM serving on AMD Instinct GPUs across parallel configurations (TP/DP/EP) and workload shapes (ISL/OSL/Concurrency). This skill runs in **mix mode** (non-disaggregated) — prefill and decode happen on the same GPUs. It produces a performance baseline and suggests config-level optimizations.
 
+## Run Rules (non-negotiable)
+
+These rules apply to every benchmark run in this skill. (A profiling-stage-separation rule exists in the broader sglang-run guidance but is intentionally omitted here, since this skill does not profile.)
+
+### Rule 1 — Do NOT modify the sglang/aiter/mori environment
+
+**Never** run `pip install`, `pip uninstall`, `pip install --upgrade`, or any equivalent reinstall command for `sglang`, `aiter`, `mori`, `flydsl`, or any related kernel/runtime package — even if a workload fails or imports look broken. The user's environments are hand-tuned dev installs (typically `pip install -e .`); a naive reinstall will silently overwrite local patches and destroy hours of work.
+
+If the environment looks broken (missing module, version mismatch, ABI error, import crash), **STOP** and report the symptom to the user. Let the user decide whether to reinstall.
+
+What you CAN do without asking:
+- Inspect versions: `pip show sglang`, `python -c "import sglang; print(sglang.__file__)"`
+- Read source files in the editable install
+- Set environment variables for the run
+
+What you MUST ask before doing:
+- `pip install` / `pip uninstall` / `pip install -U` for any package above
+- `git checkout` / `git pull` inside the editable source directories
+- Modifying files inside `sglang/`, `aiter/`, `mori/` source trees
+
+### Rule 2 — Always preserve server logs when launching an sglang server
+
+Whenever you start an sglang server, redirect stdout+stderr to a real file. Never let server output go only to the terminal or to `/dev/null`. The Bash tool's `run_in_background: true` buffer is **not** a substitute — still redirect to a file.
+
+In this skill, `serve.sh` writes to `$LOG_DIR/server_<LABEL>.log` automatically — that's what satisfies this rule, and what `wait_for_server.py` (Rule 3) reads.
+
+### Rule 3 — Wait for the server with the bundled monitor, don't blind-sleep
+
+After launching an sglang server, startup typically takes a few minutes (model load, weight shard, kernel warmup, graph capture; AITER may JIT-compile CK kernels for several minutes on first launch). Do **not** `sleep 300` and hope. Use the bundled monitor — it polls the log and returns the moment the outcome is known:
+
+```bash
+# After 3-0 deploys it, the script lives at /sgl-workspace/wait_for_server.py inside the container.
+python3 /sgl-workspace/wait_for_server.py "$SERVER_LOG"
+# exit codes:
+#   0 READY    — saw "The server is fired up and ready to roll"
+#   1 CRASHED  — saw "Traceback"
+#   2 HUNG     — log's last line + line count unchanged for >5 min
+#   3 TIMEOUT  — overall timeout (default 30 min) exceeded
+#   4 ERROR    — log file unreadable / never appeared
+```
+
+Source lives at `scripts/wait_for_server.py` in this skill's directory; 3-0 copies it to `/sgl-workspace/` alongside `serve.sh` / `bench.sh`. Detection logic:
+- **Success**: substring `The server is fired up and ready to roll` appears.
+- **Crash**: substring `Traceback` appears.
+- **Hang**: each poll records `(line_count, last_non_empty_line)` of the log; unchanged for ≥5 minutes (`--stall-seconds`) → treated as failed.
+
+Tunable flags: `--success`, `--failure`, `--stall-seconds`, `--overall-timeout`, `--poll-seconds`. Bump `--stall-seconds` consciously if a specific config genuinely has long quiet periods (e.g. very large weight downloads, prolonged AITER JIT).
+
+On `CRASHED` / `HUNG` / `TIMEOUT` / `ERROR`: stop and report the log tail to the user; do NOT silently restart.
+
+## Important Notes
+
+- This skill covers **mix mode only** (no PD-disaggregation). Prefill and decode run on the same GPUs.
+- `serve.sh` sets `SGLANG_USE_AITER=1` automatically. `bench.sh` sets `PYTHONPATH` for sglang's benchmark module automatically. No need to set these manually.
+- **Use dummy weights by default** (`LOAD_DUMMY=1`). Dummy weights are sufficient for benchmarking throughput, latency, and parallel config comparison — real weights produce the same performance characteristics. Only use `LOAD_DUMMY=0` if the user explicitly asks for real weights. Real weights take much longer to load (10+ minutes for large models) and are rarely needed for config benchmarking.
+- `--random-range-ratio 1.0` ensures exact ISL/OSL lengths (no variation) for reproducible benchmarks.
+- `bench.sh` uses `num_prompts = concurrency * 2` — this is handled by the script automatically.
+- Between configs, fully kill the sglang server and wait for GPU memory to be freed before relaunching.
+- If a benchmark run fails or hangs, check GPU memory usage with `rocm-smi` and server health with the `/health` endpoint.
+
 ## Key Metrics
 
 Every benchmark collects these metrics per (ISL, OSL, Concurrency) combination:
@@ -111,7 +171,7 @@ docker exec <container> bash -ic 'echo $PYTHONPATH' 2>/dev/null
 
 If they differ, ensure the missing paths are exported before running `serve.sh`.
 
-**If any probe reveals a broken package or missing dependency, report it to the user and stop.** Do NOT attempt to fix installs, rebuild packages, or debug environment issues yourself — that's the user's responsibility. Just report what's broken and wait for guidance.
+**If any probe reveals a broken package or missing dependency, follow Rule 1 above: report and stop. Do NOT `pip install/uninstall` sglang/aiter/mori or otherwise modify the environment yourself.**
 
 #### 0e. Locate model weights
 
@@ -290,12 +350,12 @@ Only proceed here after the user has confirmed ALL configs in Step 2.
 
 #### 3-0. Deploy benchmark scripts to the remote node
 
-The `scripts/serve.sh`, `scripts/bench.sh`, `scripts/stop.sh`, and `scripts/verify_stop.sh` files live in the skill directory on the local machine. `serve.sh`/`bench.sh`/`stop.sh` run inside the container; `verify_stop.sh` MUST run on the host (so it can see PIDs from sibling containers).
+The `scripts/serve.sh`, `scripts/bench.sh`, `scripts/stop.sh`, `scripts/verify_stop.sh`, and `scripts/wait_for_server.py` files live in the skill directory on the local machine. `serve.sh`/`bench.sh`/`stop.sh`/`wait_for_server.py` run inside the container; `verify_stop.sh` MUST run on the host (so it can see PIDs from sibling containers).
 
 ```bash
 # From local: scripts → remote node → into container (verify_stop.sh stays on the host)
-scp scripts/serve.sh scripts/bench.sh scripts/stop.sh scripts/verify_stop.sh <SSH_HOST>:/tmp/
-ssh <SSH_HOST> "docker cp /tmp/serve.sh <CONTAINER>:/sgl-workspace/ && docker cp /tmp/bench.sh <CONTAINER>:/sgl-workspace/ && docker cp /tmp/stop.sh <CONTAINER>:/sgl-workspace/"
+scp scripts/serve.sh scripts/bench.sh scripts/stop.sh scripts/verify_stop.sh scripts/wait_for_server.py <SSH_HOST>:/tmp/
+ssh <SSH_HOST> "docker cp /tmp/serve.sh <CONTAINER>:/sgl-workspace/ && docker cp /tmp/bench.sh <CONTAINER>:/sgl-workspace/ && docker cp /tmp/stop.sh <CONTAINER>:/sgl-workspace/ && docker cp /tmp/wait_for_server.py <CONTAINER>:/sgl-workspace/"
 ```
 
 Alternatively, if you're already inside the container, write the script content directly using `cat > /sgl-workspace/serve.sh << 'SCRIPT' ... SCRIPT`.
@@ -314,27 +374,28 @@ LOG_DIR=$BENCH_DIR/<CONFIG>_mtp<N> \
 BACKGROUND=1 bash serve.sh
 ```
 
+`serve.sh` writes the server's stdout+stderr to `$LOG_DIR/server_<LABEL>.log`, which is what satisfies Rule 2 (persistent server log) and what `wait_for_server.py` in 3b reads.
+
 If the user already has a running server, skip the launch and use their URL.
 
 **3b. Wait for server ready**
 
-On AMD GPUs, AITER may JIT-compile CK kernels on first launch — this can take several minutes. Don't kill the process.
-
-**Check the server log** rather than polling the health endpoint. Watch for:
-- **Success**: `"The server is fired up and ready to roll!"` in the log → server is ready
-- **Fatal error**: `"Traceback (most recent call last)"` in the log → server crashed, report to user
+Per Rule 3 above, use the bundled `scripts/wait_for_server.py` — do NOT `sleep` blindly and do NOT roll your own `tail -f | grep` loop. The script already handles stall detection (≥ 5 min unchanged) and avoids matching benign substrings like `Ignore import error` / `UserWarning`.
 
 ```bash
-timeout 900 bash -c '
-  tail -f $BENCH_DIR/<CONFIG>_mtp<N>/server_*.log 2>/dev/null | while read line; do
-    echo "$line"
-    echo "$line" | grep -q "The server is fired up and ready to roll" && exit 0
-    echo "$line" | grep -q "Traceback (most recent call last)" && exit 1
-  done
-'
+# Script was copied to /sgl-workspace/ in 3-0 alongside serve.sh / bench.sh.
+SERVER_LOG=$(ls -t $BENCH_DIR/<CONFIG>_mtp<N>/server_*.log | head -1)
+
+python3 /sgl-workspace/wait_for_server.py "$SERVER_LOG"
+# exit codes:
+#   0 READY    — saw "The server is fired up and ready to roll"
+#   1 CRASHED  — saw "Traceback"; stop and report tail of $SERVER_LOG to user
+#   2 HUNG     — log stalled ≥ --stall-seconds (default 300s); stop and report
+#   3 TIMEOUT  — overall --overall-timeout (default 1800s) exceeded
+#   4 ERROR    — log file unreadable / never appeared
 ```
 
-Do NOT match generic words like "error" or "exception" — sglang logs many benign messages containing these (e.g., "Ignore import error", "UserWarning").
+If AITER JIT compilation legitimately produces long quiet periods on a particular config, bump `--stall-seconds` (and/or `--overall-timeout`) explicitly rather than swallowing a HUNG. On any non-zero exit, **stop** and report the log tail to the user — do NOT silently relaunch.
 
 **3c. Run benchmark**
 
@@ -446,16 +507,3 @@ Present the report to the user and walk them through the key findings.
 ```
 
 Each config gets its own directory. `serve.sh` writes `server_<LABEL>.log` into `LOG_DIR`. `bench.sh` writes JSONL into `OUTPUT_DIR`; capture its stdout/stderr to the same `OUTPUT_DIR` via `2>&1 | tee $OUTPUT_DIR/<bench>.log`.
-
-## Important Notes
-
-- This skill covers **mix mode only** (no PD-disaggregation). Prefill and decode run on the same GPUs.
-- `serve.sh` sets `SGLANG_USE_AITER=1` automatically. `bench.sh` sets `PYTHONPATH` for sglang's benchmark module automatically. No need to set these manually.
-- **Use dummy weights by default** (`LOAD_DUMMY=1`). Dummy weights are sufficient for benchmarking throughput, latency, and parallel config comparison — real weights produce the same performance characteristics. Only use `LOAD_DUMMY=0` if the user explicitly asks for real weights. Real weights take much longer to load (10+ minutes for large models) and are rarely needed for config benchmarking.
-- **AITER JIT compilation**: After first server launch on AMD GPUs, AITER may JIT-compile CK kernels for several minutes (you may see "waiting for baton release" or similar messages). This is normal — do NOT kill the process. Wait for the health endpoint to report ready.
-- `--random-range-ratio 1.0` ensures exact ISL/OSL lengths (no variation) for reproducible benchmarks.
-- `bench.sh` uses `num_prompts = concurrency * 2` — this is handled by the script automatically.
-- Between configs, fully kill the sglang server and wait for GPU memory to be freed before relaunching.
-- If a benchmark run fails or hangs, check GPU memory usage with `rocm-smi` and server health with the `/health` endpoint.
-- **Don't fix broken environments yourself.** If you discover broken packages, missing libraries, or install issues during probing, report to the user and wait. Don't attempt to reinstall, rebuild, or debug — that wastes time and can make things worse.
-
