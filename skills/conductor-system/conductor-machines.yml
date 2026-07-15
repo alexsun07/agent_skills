@@ -1,0 +1,44 @@
+# Conductor machine + reservation config.
+# This file lives inside the skill directory and is edited in place.
+# The skill reads it so reservation policy and defaults live with the user,
+# not hard-coded in the skill's instructions.
+
+defaults:
+  # Timezone used when displaying times to the user and when writing --start-date /
+  # --end-date. Conductor returns UTC; the skill converts to this zone.
+  timezone: Asia/Shanghai
+
+  # Credentials AND identity come from environment variables the user sets in their
+  # shell rc (AMD_EMAIL / ATS_SECRET); the skill never hard-codes them. Both the
+  # reservation --user flag and the "我" (is this mine?) column read $AMD_EMAIL at
+  # run time, so no email is stored in this repo.
+
+  # Values reused for every reservation unless the user overrides them.
+  reservation:
+    allocation_team: AISS
+    title: Minimax
+    project: Minimax
+    description: Minimax
+    milestone: "2026-07-31T00:00:00+08:00"
+    # When computing free time, ignore gaps shorter than this many minutes.
+    skip_free_gaps_shorter_than_minutes: 60
+
+machines:
+  smc300x-clt-r4c4-02:
+    entity_id: 164b06dd-93d2-4a3d-a61e-938da3185342
+    pool: MI308X-AIG-SW-Shared-Pool
+    sku: MI300X
+    notes: Primary machine used for Minimax reservations.
+
+    # The maximum length of a single reservation request for this machine/pool.
+    # Split longer requests into chunks of at most this many hours.
+    max_reservation_hours: 72
+
+    # If a chunk fails (duration or future-booking limit), retry with these shorter
+    # durations in order before giving up. Leave empty to disable retries.
+    fallback_chunk_hours: [24, 12, 6]
+
+    # Conductor also enforces a "furthest future booking" window that is validated
+    # only by the real create (dry-run can pass while create fails). Leave as
+    # 'unknown' until observed; record the horizon here once you learn it.
+    furthest_future_booking: unknown
