@@ -155,6 +155,18 @@ conductor reservation --dry-run create \
   --description '<description>'
 ```
 
+To put more than one person on the reservation, repeat `--user` — the flag's help
+says singular, but it accepts multiple occurrences and adds each user. Accept an
+email, ntid, or short_id. Always include the requester (`$AMD_EMAIL`) plus whoever
+they name:
+
+```bash
+  ... --user "$AMD_EMAIL" --user '<colleague-email-or-short_id>' ...
+```
+
+Everyone listed shows up in the reservation's `users` array, so `--me "$AMD_EMAIL"`
+in Step 3 will correctly flag it as yours even when a colleague created it.
+
 If a batch creates multiple chunks, stop at the first failed create and report which
 chunks succeeded (`stop_on_first_create_failure` behavior).
 
