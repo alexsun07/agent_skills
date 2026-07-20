@@ -41,4 +41,19 @@ machines:
     # Conductor also enforces a "furthest future booking" window that is validated
     # only by the real create (dry-run can pass while create fails). Leave as
     # 'unknown' until observed; record the horizon here once you learn it.
+    # Observed 2026-07: creates are rejected beyond ~48h from now.
+    furthest_future_booking: "~48h from now"
+
+  smci355-ccs-aus-m04-13:
+    entity_id: 93217950-1b6e-44ba-af96-e47f4973e508
+    pool: MI355X-AIG-SW-FDE-APAC
+    sku: MI355X
+    notes: MI355X box in APAC (FDE pool). Added 2026-07-20; limits not yet observed.
+
+    # Not yet confirmed for this machine/pool; start conservative and adjust once
+    # a real create tells you the actual limit.
+    max_reservation_hours: 48
+
+    fallback_chunk_hours: [24, 12, 6]
+
     furthest_future_booking: unknown
