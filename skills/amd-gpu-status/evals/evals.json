@@ -1,0 +1,23 @@
+{
+  "skill_name": "amd-gpu-status",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Can you check smci355-ccs-aus-m04-13 and tell me which GPUs are free right now? I want to grab one for a training run.",
+      "expected_output": "Per-GPU free/busy verdict for the host with a one-line summary of which GPU ids are free.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Someone's hogging the GPUs on smci355-ccs-aus-m04-13 — who is it? Show me what PIDs are running and who owns them.",
+      "expected_output": "Table mapping each occupied GPU to PID, owning user, command, and VRAM held; idle GPUs shown as free.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Give me a full status snapshot of the AMD GPUs on smci355-ccs-aus-m04-13 — utilization, VRAM, temps, power, and anything running.",
+      "expected_output": "Health table (util/VRAM/temp/power per GPU) plus process occupancy and a free-GPU summary.",
+      "files": []
+    }
+  ]
+}

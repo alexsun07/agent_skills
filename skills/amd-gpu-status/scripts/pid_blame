@@ -1,0 +1,55 @@
+#!/bin/bash
+
+pid=($1)
+# Check the user of the process
+echo "Checking pid..."
+ps -ef | grep "$pid" | grep -v grep | grep -v "$0"
+
+# Get process start time and calculate elapsed time
+start_time=$(ps -p "$pid" -o lstart=)
+start_seconds=$(date -d "$start_time" +%s)
+now_seconds=$(date +%s)
+elapsed_seconds=$((now_seconds - start_seconds))
+
+# Convert seconds to human-friendly format
+days=$((elapsed_seconds / 86400))
+hours=$(( (elapsed_seconds % 86400) / 3600 ))
+minutes=$(( (elapsed_seconds % 3600) / 60 ))
+seconds=$((elapsed_seconds % 60))
+
+# Format the output
+human_time=""
+[ "$days" -gt 0 ] && human_time="${human_time}${days}d "
+[ "$hours" -gt 0 ] && human_time="${human_time}${hours}h "
+[ "$minutes" -gt 0 ] && human_time="${human_time}${minutes}m "
+human_time="${human_time}${seconds}s"
+
+echo "Process $pid has been running for: $human_time"
+
+user=$(ps -ef | grep "$pid" | grep -v grep | grep -v "$0" | head -n 1 | awk '{print $1}')
+
+if [ "$user" != "root" ]; then
+    echo "user: $user. Exiting."
+    exit 0
+fi
+
+echo "------------------------------------------------------------"
+echo "Process is running as root. Checking cgroup..."
+
+# Get container ID from cgroup
+cgroup_info=$(cat /proc/"$pid"/cgroup)
+container_id_full=$(echo "$cgroup_info" | grep -m 1 "docker" | cut -d '/' -f 3)
+container_id=${container_id_full:7:8}
+
+if [ -z "$container_id" ]; then
+    echo "Could not find container ID in cgroup info."
+    exit 1
+fi
+
+echo "Container ID (first 8 chars): $container_id"
+echo "------------------------------------------------------------"
+# Find the container using docker ps
+echo "Matching container:"
+docker ps -a | grep "$container_id"
+echo "------------------------------------------------------------"
+
