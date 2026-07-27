@@ -131,9 +131,21 @@ conductor --output json list reservation -n 100 \
 - When you need the intervals for planning (e.g. to split into chunks), read the
   parser's JSON yourself instead of piping to the renderer.
 
-Then split the requested window into chunks no longer than the machine's
-`max_reservation_hours`, and show the user the busy/free report plus the planned
-chunks so they can confirm before anything is created.
+Then plan the reservation. **Always book the largest policy-legal window first —
+never start from a fallback chunk size.** For each contiguous free interval you were
+asked to book, compute the end as the *earliest* of these ceilings:
+
+- `start + max_reservation_hours`
+- the machine's `furthest_future_booking` horizon (measured from now, e.g. `~48h`)
+- the reservation `milestone` from the YAML — `date_end` must be **≤** milestone, or
+  the create is rejected before it ever reaches Conductor
+- the end of the free interval itself (if the user asked for a bounded window)
+
+Book that single largest chunk first. `fallback_chunk_hours` is **only** for retrying
+*after* a real create fails (Step 4) — it is never the starting size. If one chunk
+can't cover the whole requested window (e.g. `max_reservation_hours` is smaller than
+the window), tile forward with additional max-size chunks. Show the user the busy/free
+report plus the planned chunk(s) so they can confirm before anything is created.
 
 ## Step 4: Create Reservations
 
@@ -142,8 +154,12 @@ Reservations are shared and hard to undo, so guard each chunk:
 1. Re-query overlaps for that exact window (`dates.entity_id`). If anything
    overlaps, skip that chunk and report it.
 2. Run `--dry-run`. Treat it as a syntax/eligibility check, not a guarantee.
-3. If dry-run passes, run the real create.
-4. Verify by querying reservations again — partial success is possible.
+3. If dry-run passes, run the real create **at the largest-first size computed in
+   Step 3**.
+4. Only if the real create fails on a duration/future-booking limit, retry the same
+   start with the machine's `fallback_chunk_hours` in order (largest first), stopping
+   at the first that succeeds. Never begin with a fallback size.
+5. Verify by querying reservations again — partial success is possible.
 
 Both create commands share the same flags; add or remove `--dry-run`:
 
@@ -179,6 +195,12 @@ chunks succeeded (`stop_on_first_create_failure` behavior).
 - On a duration/future-booking failure, retry the chunk with the machine's
   `fallback_chunk_hours` (in order), then stop and report if all fail. Don't invent
   smaller sizes beyond the configured list.
+- **`date_end` must be ≤ the `milestone`.** This is validated client-side (a pydantic
+  `milestone should be greater than or equal to date_end` error) *before* the request
+  is sent, so it isn't a future-booking failure and `fallback_chunk_hours` won't help
+  — it just makes the chunk end earlier. Always cap `date_end` at the milestone when
+  computing the largest-first window (Step 3). If the user needs time past the
+  milestone, ask them to bump the `milestone` in the YAML.
 - Always verify after create — never assume success.
 - DNS errors mentioning `conductor.amd.com` mean VPN/connectivity is down; stop and
   ask the user to fix it.
