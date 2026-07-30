@@ -1,0 +1,26 @@
+{
+  "skill_name": "weekly-report",
+  "evals": [
+    {
+      "id": 0,
+      "name": "typical-session-with-git",
+      "prompt": "This week I worked in the repo at MOCK_REPO_PATH. Here is what happened in our session:\n\n- We tuned the paged-attention kernel block size for MI300X. Swept block_size 8/16/32 and 16 won. We measured TTFT on 32k-token prompts drop from 240ms to 197ms (about 18%). This is committed and I confirmed the benchmark result.\n- We hit a bug where the last token of every generation came out garbled. Traced it to a trailing EOS token not being dropped in the tokenizer. Fixed it and the garbled-output test now passes.\n- We added a 32k-ISL throughput sweep benchmark script; it merged as PR #142.\n- We also started poking at whether FP8 KV cache would help, and ran one quick measurement showing memory dropped ~20%, but accuracy checks aren't done yet so we're not sure.\n\nPlease write my weekly report. cd into MOCK_REPO_PATH first so you can check the git history.",
+      "expected_output": "A file YYYYMMDD-minchsun.md in the mock repo, English, with a Summary leading on the ~18% TTFT win and the tokenizer bug fix, sections with method + benchmark numbers + commit hashes / PR #142. FP8 KV cache should appear only briefly and hedged (no accuracy conclusion), and there should be NO future plans and NO speculation.",
+      "files": []
+    },
+    {
+      "id": 1,
+      "name": "explicit-date",
+      "prompt": "Write my weekly report for 2026-07-25. Work happened in the repo at MOCK_REPO_PATH. This session we: tuned the paged-attention block size for MI300X (block 16 best, TTFT down ~18% on 32k prompts, benchmarked and confirmed), and fixed a tokenizer bug where the trailing EOS token garbled the last output token (fix verified by the previously-failing test now passing). cd into MOCK_REPO_PATH to pull the exact commit hashes.",
+      "expected_output": "A file named 20260725-minchsun.md (uses the user-specified date, not today), English, summarizing the two completed+verified items with commit hashes. No plans, no speculation.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "exploration-heavy-restraint",
+      "prompt": "Can you put together my 周报 for this week? Repo is at MOCK_REPO_PATH. Honestly most of this week was exploration: I fixed one real bug (the tokenizer trailing-EOS garbled-token bug — that's done and the test passes, it's committed). Everything else was investigation: I tried three different attention block sizes and think 16 might be best but I haven't finalized the benchmark, I read a bunch of profiler traces and have a hunch the MoE dispatch is the bottleneck but haven't confirmed it, and I was reading about FP8 and want to try it next week. cd into the repo for git details.",
+      "expected_output": "Report should firmly foreground the ONE finished+verified item (tokenizer fix, with commit). Exploration (block-size not finalized, MoE hunch) should be very brief and hedged with no conclusions. The FP8 'want to try next week' is a future plan and must be omitted. Should not present hunches as facts.",
+      "files": []
+    }
+  ]
+}
