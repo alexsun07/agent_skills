@@ -5,22 +5,88 @@
       "id": 0,
       "name": "typical-session-with-git",
       "prompt": "This week I worked in the repo at MOCK_REPO_PATH. Here is what happened in our session:\n\n- We tuned the paged-attention kernel block size for MI300X. Swept block_size 8/16/32 and 16 won. We measured TTFT on 32k-token prompts drop from 240ms to 197ms (about 18%). This is committed and I confirmed the benchmark result.\n- We hit a bug where the last token of every generation came out garbled. Traced it to a trailing EOS token not being dropped in the tokenizer. Fixed it and the garbled-output test now passes.\n- We added a 32k-ISL throughput sweep benchmark script; it merged as PR #142.\n- We also started poking at whether FP8 KV cache would help, and ran one quick measurement showing memory dropped ~20%, but accuracy checks aren't done yet so we're not sure.\n\nPlease write my weekly report. cd into MOCK_REPO_PATH first so you can check the git history.",
-      "expected_output": "A file YYYYMMDD-minchsun.md in the mock repo, English, with a Summary leading on the ~18% TTFT win and the tokenizer bug fix, sections with method + benchmark numbers + commit hashes / PR #142. FP8 KV cache should appear only briefly and hedged (no accuracy conclusion), and there should be NO future plans and NO speculation.",
-      "files": []
+      "expected_output": "Should NOT write the report file yet. Instead it checks the git history, then presents a numbered list of ~4 key points (block-size tuning with the ~18% TTFT win, the tokenizer bug fix, the PR #142 benchmark script, and a brief/hedged FP8 KV cache exploration item last), one line each with the backing commit hash or PR, and asks the user to confirm / adjust before writing. Point 1 must be an overall headline for the week; since no E2E measurement exists in this session, it should be a factual roll-up that says so rather than a fabricated number.",
+      "files": [],
+      "assertions": [
+        "Stops at the checkpoint: no weekly report file (a *-minchsun.md report) was written",
+        "Final response proposes the key points as a numbered list (1., 2., 3., ...)",
+        "Explicitly asks the user to confirm or adjust the points before the report is written",
+        "Point 1 is a headline about the week overall (an end-to-end result, or an explicit roll-up noting no end-to-end measurement was taken), not just the first work item",
+        "Proposed points cite real evidence from the repo: at least two of the actual commit hashes (970ebe8, e77a742, d65d095) or PR #142",
+        "The three finished items (block-size tuning, tokenizer fix, benchmark script) all appear as points",
+        "FP8 KV cache is listed last and marked as exploratory/hedged, with no accuracy conclusion drawn",
+        "No future plans or next steps appear in the proposed points",
+        "Each proposed point is one line/sentence, not a multi-paragraph write-up",
+        "Does not invent an end-to-end throughput number by summing the per-change wins"
+      ]
     },
     {
       "id": 1,
       "name": "explicit-date",
       "prompt": "Write my weekly report for 2026-07-25. Work happened in the repo at MOCK_REPO_PATH. This session we: tuned the paged-attention block size for MI300X (block 16 best, TTFT down ~18% on 32k prompts, benchmarked and confirmed), and fixed a tokenizer bug where the trailing EOS token garbled the last output token (fix verified by the previously-failing test now passing). cd into MOCK_REPO_PATH to pull the exact commit hashes.",
-      "expected_output": "A file named 20260725-minchsun.md (uses the user-specified date, not today), English, summarizing the two completed+verified items with commit hashes. No plans, no speculation.",
-      "files": []
+      "expected_output": "Should first propose a numbered list of the two confirmed items with their exact commit hashes and ask for confirmation, not write the file immediately. No plans, no speculation in the proposed points.",
+      "files": [],
+      "assertions": [
+        "Stops at the checkpoint: no weekly report file was written",
+        "Final response proposes the key points as a numbered list (1., 2., 3., ...)",
+        "Explicitly asks the user to confirm or adjust the points before the report is written",
+        "Point 1 is a headline about the week overall (an end-to-end result, or an explicit roll-up noting no end-to-end measurement was taken), not just the first work item",
+        "Proposes the two items the user described and invents nothing; any additional point is backed by a real commit in the repo AND explicitly flagged for the user to keep or drop, rather than added silently",
+        "Cites the exact commit hashes from git (970ebe8 for the block-size change, e77a742 for the tokenizer fix)",
+        "Acknowledges the user-specified date 2026-07-25 rather than silently defaulting to today"
+      ]
     },
     {
       "id": 2,
+      "name": "confirmed-points-full-report",
+      "prompt": "Write my weekly report from the repo at MOCK_REPO_PATH — don't ask me to confirm anything, just generate the full report file now. This session we: (a) tuned the paged-attention block size for MI300X (block 16 best, TTFT 240ms -> 197ms on 32k prompts, benchmarked and confirmed), (b) fixed a tokenizer bug where the trailing EOS token garbled the last output token (previously-failing test now passes), (c) added a 32k-ISL throughput sweep script, merged as PR #142. cd into the repo for exact hashes.",
+      "expected_output": "Honors the skip-the-checkpoint request and writes YYYYMMDD-minchsun.md in the mock repo, in English. The Summary is a NUMBERED list (1., 2., 3.) of the three items, and each point has its own matching numbered section (## 1., ## 2., ## 3.) in the same order, with method, evidence (benchmark numbers / passing test), and commit hashes or PR #142. No future plans, no speculation.",
+      "files": [],
+      "assertions": [
+        "Honors the skip-the-checkpoint request: writes the report instead of stopping to ask for confirmation",
+        "A report file named 20260813-minchsun.md was created (today in UTC+8, Linux login name)",
+        "The report is written in English",
+        "Point 1 is a headline about the week overall (an end-to-end result, or an explicit roll-up noting no end-to-end measurement was taken), not just the first work item",
+        "The Summary section is a numbered list (1., 2., 3.), not a prose paragraph",
+        "The Summary is a headline point plus the 3 work items the user described (4 points), or 3 points where point 1 is reframed as the overall result",
+        "Every non-roll-up summary point has a matching numbered section (## N.) in the same order",
+        "The report cites the real commit hashes (970ebe8, e77a742, d65d095) and/or PR #142",
+        "The report quotes the concrete TTFT numbers (240ms -> 197ms, or ~18%)",
+        "No future plans, next steps, or TODOs appear anywhere in the report"
+      ]
+    },
+    {
+      "id": 3,
       "name": "exploration-heavy-restraint",
       "prompt": "Can you put together my 周报 for this week? Repo is at MOCK_REPO_PATH. Honestly most of this week was exploration: I fixed one real bug (the tokenizer trailing-EOS garbled-token bug — that's done and the test passes, it's committed). Everything else was investigation: I tried three different attention block sizes and think 16 might be best but I haven't finalized the benchmark, I read a bunch of profiler traces and have a hunch the MoE dispatch is the bottleneck but haven't confirmed it, and I was reading about FP8 and want to try it next week. cd into the repo for git details.",
-      "expected_output": "Report should firmly foreground the ONE finished+verified item (tokenizer fix, with commit). Exploration (block-size not finalized, MoE hunch) should be very brief and hedged with no conclusions. The FP8 'want to try next week' is a future plan and must be omitted. Should not present hunches as facts.",
-      "files": []
+      "expected_output": "Should propose the numbered points first and wait for confirmation. Point 1 must be the ONE finished+verified item (tokenizer fix, with commit). Exploration items (block-size not finalized, MoE hunch) come last, very brief and hedged with no conclusions. The FP8 'want to try next week' is a future plan and must be omitted from the list. Hunches must not be stated as facts.",
+      "files": [],
+      "assertions": [
+        "Stops at the checkpoint: no weekly report file was written",
+        "Final response proposes the key points as a numbered list (1., 2., 3., ...)",
+        "Explicitly asks the user to confirm or adjust the points before the report is written",
+        "Point 1 is an overall headline that honestly characterises a mostly-exploratory week; the finished tokenizer fix appears as a point citing its real commit hash e77a742",
+        "The 'want to try FP8 next week' future plan is omitted from the proposed points",
+        "The block-size and MoE-dispatch items, if present, come after the finished item and are explicitly marked exploratory",
+        "Does not state the unconfirmed hunches as facts (no claim that block 16 is confirmed best or that MoE dispatch is the proven bottleneck)",
+        "Does not pad the list to 4 items just because the format example showed 4"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "revision-loop-requires-approval",
+      "prompt": "Earlier you proposed these points for my weekly report (repo at MOCK_REPO_PATH):\n\n1. Overall: three changes landed on the MI300X serving path; no end-to-end measurement was taken this week\n2. Paged-attention block-size tuning on MI300X - TTFT 240ms -> 197ms (~18%), `970ebe8`\n3. Tokenizer trailing-EOS bug fixed - garbled-last-token test now passes, `e77a742`\n4. 32k-ISL throughput sweep benchmark script - `d65d095` (PR #142)\n\nTwo changes: drop point 4, the sweep script was a teammate's work not mine. And on point 2, say it was 32k-token prompts specifically, that detail matters to my manager.",
+      "expected_output": "Applies both edits and re-presents the FULL revised numbered list (now 3 points, renumbered), then asks for confirmation again. Must NOT treat the edit request as approval and must NOT write the report file yet.",
+      "files": [],
+      "assertions": [
+        "Does not write a report file - the edit request is not treated as approval",
+        "Re-presents the complete revised numbered list, not just the changed lines",
+        "Point 4 (the sweep script / PR #142) is dropped",
+        "The remaining points are renumbered contiguously (1., 2., 3.)",
+        "Point 2's wording now specifies 32k-token prompts",
+        "Point 1 is still the overall headline for the week",
+        "Asks the user to confirm again after showing the revised list"
+      ]
     }
   ]
 }
