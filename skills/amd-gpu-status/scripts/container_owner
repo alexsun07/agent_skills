@@ -1,0 +1,111 @@
+#!/bin/bash
+#
+# Guess who launched a docker container.
+#
+# NOTHING HERE IS PROOF except the live-client signal. Docker does not record the
+# calling user anywhere a non-root reader can see: the daemon log needs the `adm`
+# group, auditd and /var/lib/docker need root, and /proc/<pid>/cwd of a root
+# process is unreadable without CAP_SYS_PTRACE. So this walks a chain of
+# circumstantial signals and labels how much each one is worth.
+#
+# usage: container_owner <container-id-or-name>
+
+cid=$1
+
+if [ -z "$cid" ]; then
+    echo "usage: $(basename "$0") <container-id-or-name>" >&2
+    exit 2
+fi
+
+meta=$(docker inspect "$cid" --format '{{.Id}}|{{.Name}}|{{.Config.Image}}|{{.Created}}' 2>&1)
+if [ $? -ne 0 ]; then
+    echo "Cannot inspect '$cid': $meta"
+    exit 1
+fi
+
+IFS='|' read -r full_id name image created <<< "$meta"
+name=${name#/}
+short_id=${full_id:0:12}
+
+echo "Container: $name ($short_id)"
+echo "Image:     $image"
+echo "Created:   $created"
+echo "------------------------------------------------------------"
+
+best=""
+best_why=""
+
+# --- Signal 1: a live `docker run/exec` client still attached ----------------
+# The only signal that is evidence rather than inference: the client process is
+# owned by the person who typed the command. Only survives for foreground runs;
+# anything started with -d left no client behind.
+client=$(ps -eo user:32,pid,args --no-headers 2>/dev/null \
+    | grep -E "docker[[:space:]]+(run|exec|attach|start)" \
+    | grep -v grep \
+    | grep -E -- "--name[= ]$name([[:space:]]|$)|$short_id")
+
+if [ -n "$client" ]; then
+    while read -r u p rest; do
+        echo "[strong] live docker client: $u (pid $p)"
+        echo "         ${rest:0:100}..."
+        [ -z "$best" ] && best="$u" && best_why="owns the live docker client process"
+    done <<< "$client"
+else
+    echo "[  -   ] no live docker client (started detached, or already exited)"
+fi
+
+# --- Signal 2: bind mounts pointing into someone's home ---------------------
+# Highest coverage in practice. A container mounting all of /home tells you
+# nothing, which is why the pattern requires a path component after /home/.
+mount_users=$(docker inspect "$full_id" --format '{{range .Mounts}}{{.Source}}
+{{end}}' 2>/dev/null | grep -oE '^/home/[a-z0-9_.-]+' | cut -d/ -f3 | sort -u)
+
+found_mount=""
+for u in $mount_users; do
+    if id -u "$u" >/dev/null 2>&1; then
+        example=$(docker inspect "$full_id" --format '{{range .Mounts}}{{.Source}}
+{{end}}' 2>/dev/null | grep -m1 "^/home/$u/")
+        echo "[strong] bind mount into home of: $u  ($example)"
+        found_mount=1
+        [ -z "$best" ] && best="$u" && best_why="mounts their home directory"
+    fi
+done
+[ -z "$found_mount" ] && echo "[  -   ] no bind mount resolves to a single user's home"
+
+# --- Signal 3: name and image namespace (corroboration only) ---------------
+# The image namespace says who BUILT the image, not who is running it. Observed
+# false positive: a sabreshao/vllm image running a different user's job.
+name_hit=""
+for u in $(ls /home 2>/dev/null); do
+    case "$name" in
+        *"$u"*) name_hit="$u" ;;
+    esac
+done
+[ -n "$name_hit" ] && echo "[ weak ] container name contains username: $name_hit"
+
+ns=${image%%/*}
+if [ "$ns" != "$image" ] && [[ "$ns" != *.* ]] && [[ "$ns" != *:* ]]; then
+    echo "[ weak ] image namespace: $ns (who built the image, NOT necessarily who runs it)"
+fi
+
+# --- Signal 4: who was logged in when it was created (candidates only) -----
+# Noisy: people leave tmux sessions open for days, so several users are usually
+# "logged in" at any instant. Useful only as a shortlist when 1-3 came up empty.
+if created_stamp=$(date -d "$created" +%Y%m%d%H%M%S 2>/dev/null); then
+    sessions=$(last -t "$created_stamp" 2>/dev/null \
+        | grep -vE '^$|^wtmp' | head -3 | awk '{print $1" ("$4" "$5" "$6" "$7")"}')
+    if [ -n "$sessions" ]; then
+        echo "[ guess] logged in at creation time, most recent first:"
+        echo "$sessions" | sed 's/^/           /'
+    fi
+fi
+
+echo "------------------------------------------------------------"
+if [ -n "$best" ]; then
+    echo "Best guess: $best — $best_why"
+else
+    echo "Best guess: UNKNOWN. No strong signal. The shortlist above is only"
+    echo "            'who had a session open', which is usually several people."
+    echo "            Confirming needs root: journalctl -u docker, auditd, or"
+    echo "            /var/lib/docker/containers/$short_id/config.v2.json"
+fi

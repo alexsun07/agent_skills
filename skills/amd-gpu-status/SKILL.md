@@ -59,6 +59,34 @@ Run it once per distinct PID. If a PID holds a GPU but `pid_blame` can't resolve
 (no cgroup match, permissions), say so rather than guessing — reading other users'
 `/proc` or `docker ps` may need elevated permissions.
 
+## Optional — guessing who launched a container
+
+`pid_blame` is enough for almost every question. Stop there by default.
+
+Sometimes the container name and image say nothing about who owns it
+(`mini-swe-agent-eval`, `m3-repro`, or a docker-assigned name like
+`priceless_keller`). There's a second script, `scripts/container_owner <name-or-id>`,
+that tries to guess the human. **Do not run it as part of the normal flow.** Instead,
+after reporting, offer it in one line — e.g. "容器名看不出归属，我可以从挂载路径等
+角度猜一下是谁起的，要吗？" — and run it only if they say yes.
+
+Be honest about what it is: everything but one signal is circumstantial. Docker
+records the calling user nowhere a non-root reader can reach — the daemon journal
+needs the `adm` group, auditd and `/var/lib/docker` need root. So the script ranks:
+
+- `[strong]` a live `docker run/exec` client still attached — the process owner
+  really did type the command. Only survives foreground runs; `-d` leaves nothing.
+- `[strong]` a bind mount landing in `/home/<user>/...` — best coverage in practice.
+- `[weak]` container name / image namespace — **corroboration only**. The namespace
+  says who *built* the image. A `sabreshao/vllm` image running out of
+  `/home/yinfeliu/` is a real case; going by the image name would blame the wrong
+  person.
+- `[guess]` who was logged in at `.Created` — usually several people, since tmux
+  sessions stay open for days. A shortlist, never an answer.
+
+When it prints `UNKNOWN`, report UNKNOWN. Don't promote the login shortlist into a
+name.
+
 ## Reporting
 
 Lead with what they asked. "Is GPU 3 free?" → answer in one line first. Otherwise a
