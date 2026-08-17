@@ -46,7 +46,9 @@ ssh <host> 'bash -s <pid>' < scripts/pid_blame     # remote
 bash scripts/pid_blame <pid>                         # local
 ```
 
-It prints the owning user, how long the process has run, and its full command. Its
+It prints the owning user, how long the process has run (e.g. `3d 5h 12m 8s`), and
+its full command. **Always carry that runtime into the report** — a job that's been
+up for days reads very differently from one started five minutes ago. Its
 key job: **when a PID runs as `root`** (the usual case for containerized training),
 it reads `/proc/<pid>/cgroup`, extracts the docker container ID, and matches it
 against `docker ps -a` — so an anonymous root process becomes a specific container +
@@ -63,11 +65,14 @@ Lead with what they asked. "Is GPU 3 free?" → answer in one line first. Otherw
 compact table:
 
 ```
-GPU  Status   Process (PID / owner)
-  0  free     —
-  3  busy     train.py (PID 12345 / container: alice-sglang)
+GPU  Status   Process (PID / owner)                        Uptime
+  0  free     —                                            —
+  3  busy     train.py (PID 12345 / container: alice-sglang)  3d 5h
 
 Free right now: GPU 0, 1, 2 (3 of 8).
 ```
+
+Round the uptime to two units (`3d 5h`, `12m 8s`) — the seconds only matter for
+short-lived processes.
 
 Keep it tight.

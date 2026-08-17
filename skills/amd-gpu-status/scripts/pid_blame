@@ -1,15 +1,23 @@
 #!/bin/bash
 
-pid=($1)
-# Check the user of the process
-echo "Checking pid..."
-ps -ef | grep "$pid" | grep -v grep | grep -v "$0"
+pid=$1
 
-# Get process start time and calculate elapsed time
-start_time=$(ps -p "$pid" -o lstart=)
-start_seconds=$(date -d "$start_time" +%s)
-now_seconds=$(date +%s)
-elapsed_seconds=$((now_seconds - start_seconds))
+if [ -z "$pid" ]; then
+    echo "usage: $(basename "$0") <pid>" >&2
+    exit 2
+fi
+
+# One authoritative lookup: owner, elapsed seconds, full command line.
+# -p matches the PID exactly, so no substring collisions with other PIDs.
+ps_line=$(ps -p "$pid" -o user:32=,etimes=,args= 2>/dev/null)
+
+if [ -z "$ps_line" ]; then
+    echo "PID $pid: N/A (no such process — it exited, or /proc is not visible from here)"
+    exit 1
+fi
+
+# `read` with a trailing var soaks up the rest, so args keeps its spaces.
+read -r user elapsed_seconds cmd <<< "$ps_line"
 
 # Convert seconds to human-friendly format
 days=$((elapsed_seconds / 86400))
@@ -17,16 +25,16 @@ hours=$(( (elapsed_seconds % 86400) / 3600 ))
 minutes=$(( (elapsed_seconds % 3600) / 60 ))
 seconds=$((elapsed_seconds % 60))
 
-# Format the output
 human_time=""
 [ "$days" -gt 0 ] && human_time="${human_time}${days}d "
 [ "$hours" -gt 0 ] && human_time="${human_time}${hours}h "
 [ "$minutes" -gt 0 ] && human_time="${human_time}${minutes}m "
 human_time="${human_time}${seconds}s"
 
-echo "Process $pid has been running for: $human_time"
-
-user=$(ps -ef | grep "$pid" | grep -v grep | grep -v "$0" | head -n 1 | awk '{print $1}')
+echo "PID:     $pid"
+echo "User:    $user"
+echo "Uptime:  $human_time"
+echo "Command: $cmd"
 
 if [ "$user" != "root" ]; then
     echo "user: $user. Exiting."
@@ -36,20 +44,25 @@ fi
 echo "------------------------------------------------------------"
 echo "Process is running as root. Checking cgroup..."
 
-# Get container ID from cgroup
-cgroup_info=$(cat /proc/"$pid"/cgroup)
-container_id_full=$(echo "$cgroup_info" | grep -m 1 "docker" | cut -d '/' -f 3)
-container_id=${container_id_full:7:8}
+# Get container ID from cgroup. The layout differs by cgroup version and runtime:
+#   v2 systemd:  0::/system.slice/docker-<64hex>.scope
+#   v1 cgroupfs: 11:memory:/docker/<64hex>
+#   k8s:         .../kubepods/besteffort/pod<uid>/<64hex>
+# The 64-hex container ID is the one constant, so pull it out directly rather
+# than slicing at a fixed offset.
+cgroup_info=$(cat /proc/"$pid"/cgroup 2>/dev/null)
+container_id_full=$(echo "$cgroup_info" | grep -oE -m 1 '[0-9a-f]{64}' | head -n 1)
+container_id=${container_id_full:0:12}
 
 if [ -z "$container_id" ]; then
-    echo "Could not find container ID in cgroup info."
+    echo "Could not find a container ID in cgroup info. Raw cgroup:"
+    echo "${cgroup_info:-  (unreadable — /proc/$pid/cgroup needs elevated permissions)}"
     exit 1
 fi
 
-echo "Container ID (first 8 chars): $container_id"
+echo "Container ID (first 12 chars): $container_id"
 echo "------------------------------------------------------------"
-# Find the container using docker ps
 echo "Matching container:"
-docker ps -a | grep "$container_id"
+docker ps -a --filter "id=$container_id" \
+    --format 'table {{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}' 2>&1
 echo "------------------------------------------------------------"
-
