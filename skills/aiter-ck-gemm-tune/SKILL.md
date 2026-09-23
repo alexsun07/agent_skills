@@ -3,7 +3,8 @@ name: aiter-ck-gemm-tune
 description: >
   Tune AITER's CK GEMM and fused MoE kernels for specific model shapes on AMD GPUs.
   Covers shape discovery from inference logs, baseline benchmarking, kernel tuning,
-  and before/after performance comparison.
+  and before/after performance comparison. Includes the FlyDSL MoE candidate family
+  used for MXFP8 shapes.
 ---
 
 # AITER CK GEMM & MoE Tune
@@ -34,6 +35,25 @@ Each variant follows the same tuning workflow pattern. The table below maps each
 | `batched_a8w8` | `csrc/ck_batched_gemm_a8w8/batched_gemm_a8w8_tune.py` | `aiter/configs/a8w8_untuned_batched_gemm.csv` | `aiter/configs/a8w8_tuned_batched_gemm.csv` | `op_tests/test_batched_gemm_a8w8.py` | `csrc/ck_batched_gemm_a8w8/README.md` |
 | `batched_bf16` | `csrc/ck_batched_gemm_bf16/batched_gemm_bf16_tune.py` | `aiter/configs/bf16_untuned_batched_gemm.csv` | `aiter/configs/bf16_tuned_batched_gemm.csv` | `op_tests/test_batched_gemm_bf16.py` | `csrc/ck_batched_gemm_bf16/README.md` |
 | `moe_2stages` | `csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py` | `aiter/configs/untuned_fmoe.csv` | `aiter/configs/tuned_fmoe.csv` | `op_tests/test_moe_2stage.py` | `csrc/ck_gemm_moe_2stages_codegen/README.md` |
+
+### Candidate families inside `moe_2stages`
+
+`moe_2stages` is not a single kernel implementation. One tuner, `gemm_moe_tune.py`, enumerates candidates from several independent families — assembly (`asm`), CK codegen, **FlyDSL**, and `opus` — and picks the fastest across all of them. Which families can actually serve your shape depends on the quantization type, so a run that looks broken ("every candidate fails") is often just the wrong family being enumerated.
+
+The tuner prints the per-family task counts at startup, which is the quickest way to see what is being tried:
+
+```
+stage1 asm tasks is 0, tasks_ck is 448, task_1stage is 0
+```
+
+Two undocumented environment variables control the candidate set (they exist in `gemm_moe_tune.py` but not in any of aiter's `.md` files — grep for `TUNE_ONLY` and `TUNE_MOE_KERNEL_REGEX` to confirm them against your aiter version):
+
+| Variable | Effect |
+|---|---|
+| `TUNE_ONLY=flydsl` | Restrict enumeration to one family. Accepts a comma-separated list (`flydsl`, `opus`, ...). |
+| `TUNE_MOE_KERNEL_REGEX='<pattern>'` | Keep only candidates whose kernel name matches the pattern. Debugging aid — see the caveat in Troubleshooting. |
+
+See "Tuning FlyDSL MoE candidates" in Step 3 for when you need these.
 
 ## Log Files
 
@@ -246,6 +266,8 @@ The `test_moe_2stage.py` script has a completely different CLI from the regular 
 
 To determine the correct `-q` value, match the `q_type`, `q_dtype_a`, and `q_dtype_w` from the log against this table. For example, `QuantType.per_1x128` with `fp8/fp8` maps to `-q 5`.
 
+> This table does not necessarily cover every combination your aiter version supports — MXFP8 (`QuantType.per_1x32` with `fp8/fp8`, common on gfx950) is one that may be absent. If your triple from the log is not listed, read the quant list in `op_tests/test_moe_2stage.py` directly rather than guessing an index.
+
 > **Note:** `QuantType.per_1x128` in the log corresponds to `-q 5` (`per_128x128` in the test). The name difference (`per_1x128` vs `per_128x128`) is a known inconsistency between the log and the test script — they refer to the same blockscale FP8 quantization.
 
 **Example for MoE with Qwen3.5 shapes (fp8 blockscale, 512 experts, topk=10):**
@@ -316,6 +338,47 @@ nohup python3 csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py \
 ```
 
 Note: the MoE tuner does not have `--libtype`. Use `--timeout 120` (shorter than GEMM since MoE shapes tune faster).
+
+#### Tuning FlyDSL MoE candidates
+
+FlyDSL is one of the candidate families inside `moe_2stages` (see "Candidate families" above), and it is the one that serves **MXFP8** MoE (`QuantType.per_1x32` with `fp8/fp8`). Use the normal `gemm_moe_tune.py` — there is no separate FlyDSL tuner.
+
+**Restrict enumeration to FlyDSL.** For MXFP8 shapes the assembly MoE kernels cannot serve the quant type at all, so every ASM candidate fails and floods the log with noise (`stage1 asm tasks is 26/52/78...` with all of them erroring). `TUNE_ONLY=flydsl` removes them:
+
+```bash
+cd $AITER_PATH
+mkdir -p tune_logs
+TUNE_ONLY=flydsl nohup python3 csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py \
+  -i <untuned_csv> -o <tuned_csv> \
+  -o2 tune_logs/flydsl_all_candidates.csv \
+  --mp <num_free_gpus> \
+  > tune_logs/moe_2stages_flydsl_tuning_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+```
+
+Confirm the restriction took effect — the startup line should show zero ASM tasks:
+
+```
+stage1 asm tasks is 0, tasks_ck is 448, task_1stage is 0
+```
+
+`-o2` writes every candidate's result, not just the winner. It is worth passing: it is the only way to see the runner-up kernels and their error ratios, which you will want if you need to trade a little speed for accuracy.
+
+**Expect a slow first shape.** FlyDSL kernels are JIT-compiled per candidate, and compilation dominates the first shape's wall time. On a 448-candidate shape across 4 GPUs, expect roughly 10 minutes for the first shape and well under a minute for subsequent shapes once the compile cache is warm. Do not size your timeout from the first shape alone.
+
+**Expert-parallel changes the shape.** If the model is served with expert parallelism (`--ep N`), the MoE GEMM shape differs from the tensor-parallel one: EP shards experts and restores the full intermediate dim, while TP keeps all experts and slices `inter_dim`. A config tuned for TP will not match under EP, and vice versa — the log will show `using 2stage default` for every layer. Capture shapes from a log produced by the *same* parallelism configuration you intend to serve with.
+
+**Reading `err1` / `err2` in the tuned rows.** FlyDSL stage1 has both a plain variant and a fused-quant variant whose kernel name ends in `_fp8`; the fused one emits fp8 intermediates for stage2 instead of bf16. Because it is compared against a bf16 reference, the fused variant reports a nonzero `err1` (a few percent) while the plain variant reports `0.0%`. This is quantization error inherent to the fused path, not a miscomputation, and the tuner will normally pick the fused variant because it is faster. If the accuracy budget matters, use the `-o2` file to find the best non-fused candidate and compare — and in either case validate end to end with a real accuracy benchmark rather than judging from `err1` alone.
+
+#### Verify the tuned configs are actually being used
+
+For MoE the cheapest end-to-end check is the serving log itself. Before tuning, an untuned shape logs one `using 2stage default` line per MoE call; after the tuned rows are in place those lines should disappear and be replaced by concrete kernel names:
+
+```bash
+grep -c "using 2stage default" <server_log>          # expect ~0 after tuning
+grep -oE "flydsl_moe[12]_[a-z0-9_]+" <server_log> | sort | uniq -c | head
+```
+
+Cross-check a couple of the kernel names against your tuned CSV — if they match row-for-row, the config is live. This catches the common failure where tuning succeeded but the CSV was written somewhere the runtime does not read (see `AITER_CONFIG_FMOE` in Step 4, and the model-specific configs under `aiter/configs/model_configs/`).
 
 After launching, verify the process is running and monitor progress:
 ```bash
@@ -457,3 +520,56 @@ Common issues:
 - **Stale builds with `PREBUILD_KERNELS=1`**: If aiter was installed with `PREBUILD_KERNELS=1`, you may need to remove `build/` and `*.so` in `aiter/jit/` and reinstall aiter to pick up new tuned kernels.
 - **Tuning hangs on certain shapes**: Use `--timeout` to skip shapes that take too long.
 - **Low accuracy (high errRatio)**: Tighten `--errRatio` (e.g., `0.01`) to filter out inaccurate kernel candidates.
+
+### MoE tuning: every candidate returns `us=0`
+
+Symptom — every candidate is timed as zero and the run ends with nothing tuned:
+
+```
+[aiter] no valida data after post process!
+!!!! us = 0, try 1 run
+Warning: try run 3 times, but still get 0!
+...
+Error: please check errRatio, stage1 and stage2 should be valid together!
+no valid candidate found for (...)
+[aiter] Tuning Error. tune 0 shapes
+```
+
+The error text points at error ratios and candidate validity, which reads like the kernel does not support your shape. **It usually is not.** The most likely cause is that the torch profiler captured no GPU events at all in the tuner's worker processes: `post_process_data()` filters the profiler dataframe on `device_type == DeviceType.CUDA`, gets an empty frame, and reports `us=0`. The kernels ran fine; only the timing came back empty.
+
+**Confirm it in one step** — time the same kernel with `torch.cuda.Event`, or run the shape once in a single process (`--mp 1` still uses a worker, so compare against a plain unit test such as `op_tests/test_moe_2stage.py`). If you get a sane number there while the tuner reports `us=0`, it is the profiler, not the kernel.
+
+**Fix.** On ROCm, the first HIP call sets `ROCPROFILER_REGISTER_LIBRARY` in the process environment; worker processes that inherit it come up with rocprofiler already registered and never receive dispatch callbacks. Clear it in the workers before they touch HIP. `sitecustomize.py` runs at interpreter startup, which is early enough:
+
+```bash
+mkdir -p /tmp/proffix
+cat > /tmp/proffix/sitecustomize.py <<'PY'
+import os
+os.unsetenv("ROCPROFILER_REGISTER_LIBRARY")
+PY
+
+cd $AITER_PATH
+PYTHONPATH=/tmp/proffix TUNE_ONLY=flydsl python3 \
+  csrc/ck_gemm_moe_2stages_codegen/gemm_moe_tune.py -i <untuned_csv> -o <tuned_csv>
+```
+
+Unsetting the variable in the shell before launching does **not** work — it is not set yet at that point; it appears only once the process itself initializes HIP.
+
+**Judge the fix by positive evidence, not by the error disappearing.** A run that crashes early also produces zero `no valida data` lines. Require that the tuner reported its candidate count (`Distributing N task groups`) *and* that a tuned row was actually written to the output CSV.
+
+If you would rather not depend on the profiler at all, aiter's own `perftest` already supports `torch.cuda.Event` timing via its `use_cuda_event` parameter — no tuner passes it today, so using that route means threading the flag through `aiter/test_common.py`.
+
+### MoE tuning: "stage1 and stage2 should be valid together" after using `TUNE_MOE_KERNEL_REGEX`
+
+If you narrowed candidates with `TUNE_MOE_KERNEL_REGEX` for a quick repro and the run ends with:
+
+```
+Error: please check errRatio, stage1 and stage2 should be valid together!
+no valid candidate found
+```
+
+check whether your pattern matched only stage1 kernel names. The tuner requires a valid candidate for **both** stages, so filtering stage2 away produces this error even when the surviving stage1 candidates timed perfectly. It is an artifact of the filter, not a failure. Drop the regex and run the full candidate set to get a tuned row.
+
+### MoE tuning: all ASM candidates fail
+
+If `stage1 asm tasks is 26/52/78...` and every one of them errors, the ASM MoE kernels cannot serve your quantization type — MXFP8 (`QuantType.per_1x32`) is one such case. Set `TUNE_ONLY=flydsl` to enumerate only the family that can serve the shape; the startup line should then read `stage1 asm tasks is 0`.
