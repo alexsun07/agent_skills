@@ -133,6 +133,17 @@ directory** as a Markdown file named:
 
 Write the report in **English**.
 
+### One paragraph, one line — no hard wrapping
+
+Do not insert line breaks inside a paragraph, a bullet, or a numbered item. Each one is a
+single unbroken line in the source, however long it runs; let the editor soft-wrap it.
+
+Markdown renderers collapse hard wraps, so a wrapped paragraph *looks* fine — the damage
+shows up on copy. The user pastes the report into a doc, an email, or a chat box, and the
+hard breaks come with it: the paragraph arrives chopped into ragged short lines that have
+to be rejoined by hand. Blank lines between blocks are still correct; it's breaks *within*
+a block that cause this.
+
 ## What to include — and what to leave out
 
 These four rules are the heart of the skill. When you're unsure whether something
@@ -235,3 +246,7 @@ in it came from a real measurement, not from adding up the per-item wins), the s
 a numbered list, every summary point has a matching numbered section, and the numbering,
 order, and wording match what the user approved. If you added or dropped a point while
 writing, say so when you report back.
+
+Finally, check the source formatting: no paragraph, bullet, or numbered item is broken
+across multiple lines. This is easy to get wrong out of habit, and it's invisible in the
+rendered view — so verify it in the raw Markdown.
